@@ -7,18 +7,20 @@ The JVMMonitor CLI provides a full-featured interactive command-line interface f
 ## Starting the CLI
 
 ```bash
-# Connect to a running agent
+# Start interactive CLI (no connection)
+java -jar jvmmonitor.jar cli
+
+# Start CLI and connect to a running agent
 java -jar jvmmonitor.jar connect <host> <port>
 
-# Inject agent into a running JVM and connect
+# Start CLI, inject agent into a running JVM, and connect
 java -jar jvmmonitor.jar attach <pid> [--port <port>]
 
-# List available JVMs
+# List available JVMs and exit
 java -jar jvmmonitor.jar list
-
-# Start without connecting (interactive mode)
-java -jar jvmmonitor.jar
 ```
+
+**Note:** `java -jar jvmmonitor.jar` without arguments launches the Swing GUI, not the CLI. Use `cli` to start the command-line interface.
 
 Once started, the CLI presents an interactive prompt:
 

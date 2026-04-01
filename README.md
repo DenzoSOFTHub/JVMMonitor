@@ -99,10 +99,12 @@ java -agentpath:dist/linux/jvmmonitor.so=port=9090 -jar your-app.jar
 # Option 2: Inject agent at runtime
 java -jar dist/jvmmonitor.jar attach <PID> --port 9090
 
-# Option 3: Swing GUI
+# Option 3: Swing GUI (default)
+java -jar dist/jvmmonitor.jar
 java -jar dist/jvmmonitor.jar gui
 
-# Option 4: CLI
+# Option 4: CLI (interactive)
+java -jar dist/jvmmonitor.jar cli
 java -jar dist/jvmmonitor.jar connect 127.0.0.1 9090
 
 # Demo mode (no real JVM needed)
