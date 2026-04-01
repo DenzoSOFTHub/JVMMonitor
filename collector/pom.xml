@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>it.denzosoft.jvmmonitor</groupId>
+    <artifactId>jvmmonitor-collector</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>JVMMonitor Collector</name>
+    <description>JVM profiling collector with native agent support</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <java.source>1.8</java.source>
+        <java.target>1.8</java.target>
+        <jar.classifier></jar.classifier>
+    </properties>
+
+    <!-- No runtime dependencies. Decompiler sources copied from DenzoSOFT-JavaDecompiler. -->
+    <dependencies>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <profiles>
+        <!--
+          Profile: java6
+          Produces: jvmmonitor-collector-*-jdk6.jar
+          Usage:    mvn package -Pjava6 (requires JDK 6, 7, or 8 to compile)
+        -->
+        <profile>
+            <id>java6</id>
+            <properties>
+                <java.source>1.6</java.source>
+                <java.target>1.6</java.target>
+                <jar.classifier>jdk6</jar.classifier>
+            </properties>
+        </profile>
+
+        <!--
+          Profile: java8 (default, also works on JDK 9+)
+          Produces: jvmmonitor-collector-*.jar
+          Usage:    mvn package  OR  mvn package -Pjava8
+        -->
+        <profile>
+            <id>java8</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <java.source>1.8</java.source>
+                <java.target>1.8</java.target>
+                <jar.classifier></jar.classifier>
+            </properties>
+        </profile>
+    </profiles>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>${java.source}</source>
+                    <target>${java.target}</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.2.0</version>
+                <configuration>
+                    <classifier>${jar.classifier}</classifier>
+                    <archive>
+                        <manifest>
+                            <mainClass>it.denzosoft.jvmmonitor.Main</mainClass>
+                        </manifest>
+                        <manifestEntries>
+                            <Java-Target>${java.target}</Java-Target>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.2.4</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>it.denzosoft.jvmmonitor.Main</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

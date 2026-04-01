@@ -1,0 +1,21 @@
+# Build artifacts
+collector/target/
+agent/build/
+dist/
+
+# IDE
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
