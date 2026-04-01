@@ -278,11 +278,15 @@ Class histogram showing top classes by memory usage.
 jvm-monitor> histogram
 === Class Histogram (took 1250.3ms) ===
 CLASS                                              INSTANCES         SIZE
-[B                                                    45230     125.3 MB
+byte[]                                                45230     125.3 MB
 java.lang.String                                      38100      12.5 MB
 java.util.HashMap$Node                                12400       3.8 MB
+int[]                                                  8900       2.1 MB
+java.lang.Object[]                                     6200       1.5 MB
 ...
 ```
+
+Class names are displayed in standard Java notation (`byte[]` instead of JVM internal `[B`, `java.lang.String` instead of `Ljava/lang/String;`).
 
 **Note:** Requesting a histogram pauses the JVM for 0.5-5 seconds. Use in production with caution.
 
