@@ -523,7 +523,7 @@ public class CliMain {
         for (int i = 0; i < shown; i++) {
             if (entries[i] != null) {
                 System.out.println(String.format("%-50s %10d %10.1f MB",
-                        truncate(entries[i].getClassName(), 50),
+                        truncate(it.denzosoft.jvmmonitor.gui.chart.ClassNameFormatter.format(entries[i].getClassName()), 50),
                         entries[i].getInstanceCount(),
                         entries[i].getTotalSizeMB()));
             }
