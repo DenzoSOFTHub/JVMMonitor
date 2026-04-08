@@ -2,6 +2,7 @@
  * JVMMonitor - Thread Monitor Implementation
  */
 #include "jvmmon/thread_monitor.h"
+#include "jvmmon/log.h"
 #include "jvmmon/alarm_engine.h"
 #include "jvmmon/protocol.h"
 #include <string.h>

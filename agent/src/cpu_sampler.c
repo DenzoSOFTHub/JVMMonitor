@@ -4,6 +4,7 @@
  * On Linux: SIGPROF timer. On Windows: periodic GetThreadContext.
  */
 #include "jvmmon/cpu_sampler.h"
+#include "jvmmon/log.h"
 #include "jvmmon/protocol.h"
 #include <string.h>
 
