@@ -1,8 +1,8 @@
-# JVMMonitor v1.1.0
+# JVMMonitor v1.2.0
 
-A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI agent collects performance data from a running JVM and streams it over TCP to a Java collector with CLI, Swing GUI, and integrated Java decompiler.
+A comprehensive JVM profiling, monitoring, and diagnostic tool. Native JVMTI agent (C) and pure Java agent collect performance data from a running JVM and stream it over TCP to a Java collector with CLI, Swing GUI, and integrated Java decompiler.
 
-**Java 1.6+ compatible | Zero external dependencies | ~830 KB single JAR**
+**Java 1.6+ compatible | Zero external dependencies | ~1 MB single JAR**
 
 ## Features
 
@@ -17,7 +17,7 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
 ### Diagnostics
 - **Exception Tracking** — rate chart, hotspot detection with code location, stack traces, top exception classes
 - **Lock Analysis** — contention rate, lock hotspots with code location, owner/waiter tracking, longest wait events
-- **Intelligent Alarms** — 9 rule-based engines with 16+ contextual alarms (not naive thresholds):
+- **Intelligent Alarms** — 11 rule-based engines with 20+ contextual alarms (not naive thresholds):
   - Memory: live set trend on Full GC (not heap %), old gen exhaustion, allocation pressure
   - GC: throughput degradation, long pauses
   - CPU: sustained saturation with GC correlation, runaway thread detection
@@ -26,6 +26,8 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
   - Network: TCP connection leak (CLOSE_WAIT trend), retransmit degradation
   - Response time: degradation vs baseline, slow JDBC queries, connection pool exhaustion
   - Classloader leak, safepoint issues
+  - **GC Tuning**: Full GC storm (reclaim <20%), System.gc() calls, promotion pressure, GC CPU saturation, heap saturation after GC
+  - **JVM Flags**: missing -Xmx, -Xmx>32GB compressed oops, HeapDumpOnOutOfMemoryError, MaxMetaspaceSize, deprecated CMS, Serial/Parallel on large heaps, JDWP in production, ExitOnOutOfMemoryError
 - **Configurable Thresholds** — all alarm thresholds editable via GUI (Tools > Alarm Config) or CLI, save/load to `.thresholds` files
 - **Memory Leak Detection** — old gen analysis, class histogram comparison (delta columns), leak suspects, big objects (avg instance >1KB)
 - **Allocation Recording** — start/stop recording, aggregate by class with allocation site
@@ -36,10 +38,21 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
 - **Messaging** — queue depth, enqueue/dequeue rates, consumer lag, alerts for backlog/stale messages (JMS, Kafka, RabbitMQ)
 
 ### Instrumentation & Debugging
-- **Instrumentation** — JVMTI method entry/exit tracing with 8 configurable probes (JDBC/JPA, Spring, HTTP, JMS/Kafka/RabbitMQ, JavaMail, Cache/Redis, Disk I/O, Socket I/O). Parameter capture: record input parameters and return values as JSON with configurable max value length. Also applies to SQL string truncation.
-- **Request Tracer** — end-to-end call chain visualization as expandable tree-table (TraceTreeTable) with timing per method
+- **Instrumentation** — JVMTI method entry/exit tracing with 10 configurable probes (JDBC/JPA, Spring, HTTP, JMS/Kafka/RabbitMQ, JavaMail, Cache/Redis, Disk I/O, Socket I/O, Scheduling, JMS Extended). Parameter capture: record input parameters and return values as JSON. **Resource counters per method**: allocated bytes, blocked time, waited time, CPU time.
+- **Trace Analysis** — double-click any trace to open 5-tab deep-dive dialog:
+  - **Call Tree**: TreeTable with descriptor, inner time, duration, CPU, alloc, blocked, waited, % bar (expand/collapse)
+  - **Aggregation**: methods grouped by descriptor, sorted by total inner time descending
+  - **SQL**: JDBC queries sorted by offset from trace start
+  - **Exceptions**: exception events in the trace
+  - **HTTP**: Parameters + Headers sub-tabs
+  - **Export JSON** + **Save Report** buttons
+- **Traces tab** — last 200 completed traces with descriptor (URL/job/SQL), alloc, exc count, SQL count
+- **Running tab** — in-progress traces with real elapsed time
+- **Method Profiler** — aggregated by descriptor with total time, calls, avg, max, alloc, exc, SQL
 - **JDBC Monitor** — 3 sub-tabs: SQL Statistics (aggregated by query), SQL Events (individual executions), Connection Monitor (open connections with thread, duration, leak detection)
-- **HTTP Profiler** — HTTP request tracking with method, URL, status, duration (filtered to HTTP methods only)
+- **HTTP Profiler** — HTTP request tracking with method, URL, status, duration, percentiles (P50/P95/P99)
+- **Scheduling probe** — Timer, ScheduledExecutorService, Spring @Scheduled, EJB TimerService, Quartz jobs
+- **JMS Extended probe** — connection lifecycle, session, producer/consumer, queue/topic, commit/rollback, acknowledge
 - **Remote Debugger** — enable/disable toggle, conditional breakpoints, step over/into/out, variable inspection, watch expressions
 - **Source Viewer** — request class bytecode from agent, decompile on-the-fly with DenzoSOFT Java Decompiler, syntax highlighting (keywords, strings, comments, annotations, numbers)
 - **Web Probe** — captures browser user actions (clicks, navigations, AJAX/fetch requests, JavaScript errors, page load timing, form submits) without modifying frontend code. A JavaScript beacon is auto-injected into HTML responses via Servlet Filter instrumentation. Works with any web framework: Angular, React, Vue, plain HTML, JSP, Thymeleaf. Supports reverse proxy injection via Nginx (`sub_filter`), Apache (`mod_substitute`), Kubernetes Ingress annotations, and Spring Cloud Gateway filters. Manual script tag available for standalone frontends.
@@ -54,7 +67,8 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
 - **Hot Swap** — live code patching via JVMTI RedefineClasses (upload .class file)
 - **Heap Dump** — trigger .hprof dump on agent host
 - **Thread Dump** — full stack dump with save to file
-- **JVM Configuration** — startup parameters (-Xmx, -XX flags), system properties, classpath
+- **JVM Configuration** — startup parameters (-Xmx, -XX flags), system properties, classpath. Sent automatically at agent startup via JvmConfigCollector (core module).
+- **JMX Browser** — top-level tab with JTree. On-demand refresh via button. MBeans grouped by domain, click to load attributes. CompositeData auto-expanded into sub-branches. Independent of memory/CPU charts.
 - **JMX MBean Browser** — navigate and inspect MBeans
 - **Agent Modules** — progressive profiling levels (0=off, 1=statistical, 2=detailed, 3=surgical)
 
@@ -346,28 +360,32 @@ The agent starts in **CORE mode** with only the 6 always-on components. All prof
 
 ```
 dist/
-  linux/jvmmonitor.so       # Native agent for Linux (~103 KB)
-  windows/jvmmonitor.dll    # Native agent for Windows (~416 KB)
-  jvmmonitor-agent.jar      # Pure Java agent, any platform (~900 KB, includes Javassist)
-  jvmmonitor.jar            # Collector JAR (~830 KB, includes decompiler)
+  linux/jvmmonitor.so       # Native agent for Linux x86_64 (~114 KB)
+  windows/jvmmonitor.dll    # Native agent for Windows x86_64 (~435 KB)
+  jvmmonitor-agent.jar      # Pure Java agent, any platform (~944 KB, includes Javassist)
+  jvmmonitor.jar            # Collector JAR (~1073 KB, includes decompiler)
 ```
+
+## Quick Demo
+
+Launch the GUI and click the green **Demo Agent** button in the toolbar — it starts an in-process demo agent on a random port and auto-connects. All charts populate with realistic simulated data.
 
 ## Testing
 
 ```bash
 make test         # Run all tests (36 C + 120 Java)
 make test-c       # C agent tests only
-make test-java    # Java collector tests only
+make test-java    # Java collector tests only (120 tests)
 ```
 
 ## Source Statistics
 
-- 98 Java source files (JVMMonitor collector)
-- 21 Java source files (JVMMonitor Java agent)
+- 105+ Java source files (JVMMonitor collector)
+- 30+ Java source files (JVMMonitor Java agent)
 - 139 Java source files (DenzoSOFT Java Decompiler, integrated)
 - 29 C source files (native agent)
 - 30 C header files
-- Total: ~317 source files
+- Total: ~333 source files
 
 ## License
 

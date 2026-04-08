@@ -38,21 +38,28 @@ C tests use a custom framework in `agent/test/test_main.c`. Java tests use JUnit
 **Two-component system**: C native agent (JVMTI) + Java collector, communicating over a custom binary TCP protocol.
 
 ### Performance Impact
-- Core overhead (no modules enabled): **~1-2% CPU, ~2-5 MB RSS**
+- Default polling interval: **2000ms** (aligned to collector GUI 2s refresh)
+- Core overhead (Dashboard modules): **~1-2% CPU, ~2-5 MB RSS** — 5 core modules always on
 - No collector connected: near-zero impact (ring buffer drained silently)
 - On-demand modules add overhead only when enabled (2-15% depending on module)
 - Histogram walks heap with pause (0.5-5s) — one-shot, not continuous
 - Debugger pauses thread at breakpoint only — zero overhead otherwise
+- JNI caching saves ~50 FindClass/GetMethodID calls per poll cycle in native agent
+- Instrumentation resource counters add ~2μs per method call (ThreadMXBean queries)
 
 ### Native Agent (C) - TCP Server — Linux/Windows
-- Version: 1.1.0. Entry points: `Agent_OnLoad` / `Agent_OnAttach` / `Agent_OnUnload`
-- Lock-free SPSC ring buffer → TCP transport
+- Version: 1.2.0. Entry points: `Agent_OnLoad` / `Agent_OnAttach` / `Agent_OnUnload`
+- Lock-free SPSC ring buffer (uint32_t head/tail, spinlock-safe for SIGPROF) → TCP transport
 - Wire protocol: big-endian binary, 10-byte header (magic `0x4A564D4D`, version, type, length)
 - Protocol constants must stay in sync: `agent/include/jvmmon/protocol.h` ↔ `collector/.../protocol/ProtocolConstants.java`
 - Crash handler: auto-saves diagnostic dump on VMDeath/signal. Signal handler uses ONLY async-signal-safe functions (write, open, close)
 - Capabilities: per-capability graceful degradation (each capability requested individually, missing ones skipped)
 - Runtime injection (Agent_OnAttach) fully supported: AttachCurrentThread in thread_monitor and cpu_sampler, PushLocalFrame in jmx_reader. Produces Memory, Threads, CPU Usage, OS Metrics, GC events, Thread CPU.
-- Auto-activated modules at startup (Dashboard data always available): `os`, `threadcpu`, `network`, `gcdetail`
+- Auto-activated modules at startup (Dashboard data always available): `os`, `threadcpu`, `network`
+- JNI method ID caching: memory_monitor, jmx_reader, exception_tracker, finalizer_tracker resolve FindClass/GetMethodID once, reuse every poll cycle
+- PushLocalFrame/PopLocalFrame in all JNI-heavy functions (jmx_reader, finalizer_tracker, native_mem, string_table, gc_detail)
+- EINTR/EAGAIN retry in socket send/recv (platform_linux.c)
+- Module auto-disable timers: module_registry_check_timers() called from transport idle loop
 - Detach command: shuts down agent completely (stops all modules, closes transport, zero overhead). Agent becomes dormant, restartable via re-attach. Different from disconnect (which only disconnects the collector).
 - Rate limiter: atomic CAS for thread-safe exception throttling
 - Transport: 100 Hz idle polling (10ms sleep)
@@ -60,12 +67,16 @@ C tests use a custom framework in `agent/test/test_main.c`. Java tests use JUnit
 - JMX Browser: responds to `DIAG_CMD_JMX_LIST_MBEANS` (0x33) and `DIAG_CMD_JMX_GET_ATTRS` (0x34) via JNI MBeanServer calls
 
 ### Java Agent - TCP Server — Any JVM Platform
-- Version: 1.1.0. Entry points: `premain` / `agentmain`
+- Version: 1.2.0. Entry points: `premain` / `agentmain`
 - Pure Java using `java.lang.management` MXBeans + `java.lang.instrument` + Javassist (shaded)
 - Same binary TCP protocol as C agent — collector works unchanged
 - 14 modules: memory, gc, threads, cpu_usage, thread_cpu, os, classloaders, jit, cpu_sampler, histogram, deadlock, instrumentation, jvmconfig, web_probe
 - Core modules (always on, auto-activated): memory, gc, threads, cpu_usage, os, jvmconfig — Dashboard charts populate without user intervention
-- Bytecode instrumentation via Javassist: 8 probes (JDBC, Spring, HTTP, Messaging, Mail, Cache, Disk I/O, Socket I/O)
+- Bytecode instrumentation via Javassist: 10 probes (JDBC, Spring, HTTP, Messaging, Mail, Cache, Disk I/O, Socket I/O, Scheduling, JMS Extended)
+- Scheduling probe: ScheduledThreadPoolExecutor, java.util.Timer, Spring TaskScheduler, EJB TimerService (javax + jakarta), Quartz (Job.execute, Scheduler.scheduleJob/triggerJob/pauseJob/resumeJob/deleteJob)
+- JMS Extended probe: ConnectionFactory.createConnection, Connection.start/close, createSession, Session.close/commit/rollback, createProducer/Consumer/Queue/Topic, QueueBrowser, Message.acknowledge
+- Resource counters per instrumented method: allocatedBytes (ThreadMXBean.getThreadAllocatedBytes), blockedTimeMs, waitedTimeMs, cpuTimeNs (ThreadMXBean.getCurrentThreadCpuTime) — captured via ThreadLocal push/pop in InstrumentationRecorder
+- ClassPool created fresh per transform (no classloader leak); interfaces and native methods skipped
 - Web Probe: automatic browser user action capture via Servlet bytecode injection + BeaconBridge (System.properties cross-classloader bridge)
 - JvmConfigCollector: sends `RuntimeMXBean.getInputArguments()` + key system properties as `MSG_JVM_CONFIG` at startup (core)
 - JMX Browser: handles `DIAG_CMD_JMX_LIST_MBEANS` / `DIAG_CMD_JMX_GET_ATTRS` via ManagementFactory.getPlatformMBeanServer(), decomposes CompositeData into `attr.subkey` pairs
@@ -75,12 +86,12 @@ C tests use a custom framework in `agent/test/test_main.c`. Java tests use JUnit
 - Limitations: no AsyncGetCallTrace (uses dumpAllThreads fallback), no breakpoints, no field watch, no native memory tracking, no per-socket byte counters (no NetworkCollector)
 
 ### Collector (Java) - TCP Client
-- Package: `it.denzosoft.jvmmonitor`. Version: 1.1.0
+- Package: `it.denzosoft.jvmmonitor`. Version: 1.2.0
 - Source compatibility: Java 1.6 (no diamond, no lambda, no try-with-resources)
 - Zero external runtime dependencies
 - Includes DenzoSOFT Java Decompiler sources (`it.denzosoft.javadecompiler`, 139 files)
 - Entry point: `it.denzosoft.jvmmonitor.Main`
-- Production hardening: socket cleanup on error, method cache capped at 10K, EDT crash prevention via safeRefresh(), histogram TOCTOU fixed
+- Production hardening: EventMessage bounds checking on all reads, LRU caches (methodNameCache 10K, latestThreads 5K, openConnections 1K, DecompilerBridge 100), all getValueAt() bounds-guarded, resource leak fixes (CsvExporter, SettingsPanel try/finally), division by zero guards in analysis rules
 - Background refresh: all panels update data in background via updateData(), charts/tables always current
 
 ### GUI Tabs (17)
@@ -93,6 +104,11 @@ Dashboard, Memory, GC Analysis, Threads, Exceptions, Network, Integration, Messa
 - Background refresh: all panels update data via updateData() in background, not just the visible one
 - Attach dialog: ComboBox to choose agent type (Java Agent portable/recommended, Native Agent, Custom with file browser), shows found/not found status, detects if agent already running on port
 - Instrumentation: parameter capture checkbox ("Capture params & return values") with max value length field; applies also to SQL string truncation
+- Instrumentation sub-tabs: Traces (last 200 completed, descriptor + Alloc/Exc/SQL columns), Running (in-progress), Method Profiler (aggregated by descriptor), JDBC Monitor (3 sub-tabs), HTTP Profiler, Disk I/O, Socket I/O, All Events
+- Trace Analysis dialog (double-click a trace): 5 tabs — Call Tree (TreeTable with inner time, CPU, alloc, blocked, waited, % bar), Aggregation, SQL, Exceptions, HTTP (Parameters + Headers sub-tabs). Export JSON + Save Report buttons.
+- Trace descriptor: shows URL for HTTP/controllers, job class for schedulers, SQL for JDBC, JMS class for messaging — not class.method
+- CPU Usage: dashed average lines, CPU Breakdown chart with top-5 OS processes (replaces "Other")
+- System Resources: Top Process CPU chart with 5-minute history
 
 ### CLI Commands (30+)
 Full feature parity with GUI: status, memory, gc, threads, cpu, exceptions, network, locks, queues, integration, processes, os, jit, classloaders, nativemem, safepoints, histogram, profiler, instrument, diagnose, alarms, threshold, save, load, export, watch, enable, disable, modules, detach, settings (show|set|save|load)
@@ -118,10 +134,10 @@ JVM (JVMTI) → Agent modules → ring_buffer → TCP → Collector (ProtocolDec
 ### Build Outputs
 ```
 dist/
-  linux/jvmmonitor.so       # ~103 KB (native agent, Linux)
-  windows/jvmmonitor.dll    # ~416 KB (native agent, Windows)
-  jvmmonitor-agent.jar      # ~900 KB (Java agent, any platform, includes Javassist)
-  jvmmonitor.jar            # ~830 KB (collector, includes decompiler)
+  linux/jvmmonitor.so       # ~114 KB (native agent, Linux x86_64)
+  windows/jvmmonitor.dll    # ~435 KB (native agent, Windows x86_64)
+  jvmmonitor-agent.jar      # ~944 KB (Java agent, any platform, includes Javassist)
+  jvmmonitor.jar            # ~1073 KB (collector, includes decompiler)
 ```
 
 ### Demo Mode
