@@ -25,7 +25,7 @@ java -jar jvmmonitor.jar list
 Once started, the CLI presents an interactive prompt:
 
 ```
-JVMMonitor v1.0.0
+JVMMonitor v1.1.0
 Type 'help' for available commands.
 
 jvm-monitor>
@@ -62,7 +62,7 @@ The CLI searches for `jvmmonitor.so` (Linux) or `jvmmonitor.dll` (Windows) in:
 
 After injection, the agent starts listening on the specified port (default 9090) and the CLI connects automatically.
 
-### connect / disconnect
+### connect / disconnect / detach
 
 ```
 jvm-monitor> connect 192.168.1.10 9090
@@ -71,6 +71,21 @@ Connected to agent PID 12345 @ myhost (OpenJDK 17.0.9)
 jvm-monitor> disconnect
 Disconnected.
 ```
+
+`disconnect` closes the collector's connection but the agent keeps running in the target JVM. You can reconnect later.
+
+### detach
+
+Shut down the agent completely. This stops all modules, closes the transport, and leaves zero overhead in the target JVM. The agent becomes dormant. You can restart it later via `attach`.
+
+```
+jvm-monitor> detach
+Agent shut down. All modules stopped, transport closed.
+```
+
+This is different from `disconnect`:
+- **`disconnect`** — Collector disconnects. Agent keeps running, collecting data, and listening for new connections.
+- **`detach`** — Agent shuts down entirely. No CPU overhead, no threads, no listening socket. The agent code remains loaded in the JVM but is completely dormant. Use `attach` again to restart it.
 
 ## Monitoring Commands
 
@@ -300,6 +315,36 @@ Class names are displayed in standard Java notation (`byte[]` instead of JVM int
 | `safepoints` | Safepoint count, total/sync time, averages |
 | `alarms` | Active alarms from the agent |
 
+### classes
+
+List loaded classes, optionally filtered by name pattern:
+
+```
+jvm-monitor> classes
+jvm-monitor> classes com.myapp.service
+CLASS                                              LOADER
+com.myapp.service.OrderService                     app
+com.myapp.service.UserService                      app
+com.myapp.service.PaymentService                   app
+...
+```
+
+### decompile
+
+Request class bytecode from the agent and decompile it on-the-fly using the integrated DenzoSOFT Java Decompiler:
+
+```
+jvm-monitor> decompile com.myapp.service.OrderService
+// Decompiled by DenzoSOFT Java Decompiler
+package com.myapp.service;
+
+public class OrderService {
+    public Order getOrder(long id) {
+        ...
+    }
+}
+```
+
 ## Profiling
 
 ### CPU Profiler
@@ -348,6 +393,8 @@ jvm-monitor> instrument stop
 ```
 
 Available probes: `jdbc`, `spring`, `http`, `messaging`, `mail`, `cache`, `disk_io`, `socket_io`
+
+**Web Probe events** (browser user actions) also appear in `instrument events` output when the `webprobe` module is enabled (`enable webprobe 1`). These events have type USER and include clicks, navigations, AJAX/fetch requests, JavaScript errors, page loads, and form submits.
 
 **Disk I/O** and **Socket I/O** probes are disabled by default (5-15% overhead). Enable them explicitly when investigating per-thread I/O.
 
@@ -415,6 +462,53 @@ jvm-monitor> threshold load production.thresholds
 
 Threshold files are plain text (key=value), easy to version control and deploy across environments.
 
+## Settings
+
+The `settings` command manages all JVMMonitor parameters from the CLI. This is the CLI equivalent of the GUI Settings tab.
+
+### settings show
+
+Display all current settings with their values:
+
+```
+jvm-monitor> settings show
+PARAMETER                           VALUE
+connection.host                     127.0.0.1
+connection.port                     9090
+gui.refreshInterval                 2000
+instrumentation.captureParams       false
+instrumentation.maxValueLength      200
+alarm.cpu.warnPct                   80.0
+alarm.gc.throughputWarnPct          90.0
+...
+```
+
+### settings set
+
+Change a setting value:
+
+```
+jvm-monitor> settings set gui.refreshInterval 3000
+gui.refreshInterval = 3000
+
+jvm-monitor> settings set instrumentation.captureParams true
+instrumentation.captureParams = true
+```
+
+### settings save / load
+
+Save all settings to a file or load from a file:
+
+```
+jvm-monitor> settings save production.settings
+Settings saved to production.settings
+
+jvm-monitor> settings load production.settings
+Settings loaded from production.settings
+```
+
+Settings files are plain text (key=value format), suitable for version control.
+
 ## Session Management
 
 ### save
@@ -466,6 +560,9 @@ jvm-monitor> enable exceptions 1
 
 # Enable locks with surgical targeting
 jvm-monitor> enable locks 2 --target com.myapp.CacheManager --duration 60
+
+# Enable web probe to capture browser user actions
+jvm-monitor> enable webprobe 1
 
 # Disable a module
 jvm-monitor> disable exceptions

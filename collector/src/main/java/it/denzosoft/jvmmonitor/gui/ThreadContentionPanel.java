@@ -96,7 +96,7 @@ public class ThreadContentionPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         List<ThreadInfo> threads = collector.getStore().getLatestThreadInfo();
         tableModel.setData(threads);
 
@@ -170,6 +170,15 @@ public class ThreadContentionPanel extends JPanel {
             activityChart.addSnapshot(System.currentTimeMillis(),
                     new int[]{db, net, disk, msg, ws, lock, app, other});
         }
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     private static class ThreadTableModel extends AbstractTableModel {

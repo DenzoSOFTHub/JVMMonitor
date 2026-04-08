@@ -123,6 +123,9 @@ static void send_lock_event(lock_monitor_t *lm, JNIEnv *jni, jvmtiEnv *jvmti,
 
     agent_send_message(JVMMON_MSG_LOCK_EVENT, payload, (uint32_t)off);
 
+    /* Clean up JVMTI-allocated resources */
+    if (usage.waiters) (*jvmti)->Deallocate(jvmti, (unsigned char *)usage.waiters);
+    if (usage.notify_waiters) (*jvmti)->Deallocate(jvmti, (unsigned char *)usage.notify_waiters);
     if (tinfo.name) (*jvmti)->Deallocate(jvmti, (unsigned char *)tinfo.name);
     if (class_sig) (*jvmti)->Deallocate(jvmti, (unsigned char *)class_sig);
     (*jni)->DeleteLocalRef(jni, lockClass);

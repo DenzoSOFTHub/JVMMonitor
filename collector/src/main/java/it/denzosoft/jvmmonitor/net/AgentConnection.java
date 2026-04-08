@@ -9,9 +9,9 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Connects to a running JVMMonitor agent.
@@ -35,13 +35,19 @@ public class AgentConnection {
     private String agentHostname = "";
     private String jvmInfo = "";
 
-    /* Module status tracking */
-    private final List<ModuleStatus> moduleStatuses =
-            java.util.Collections.synchronizedList(new ArrayList<ModuleStatus>());
+    /* Module status tracking — keyed by name to prevent accumulation */
+    private final java.util.Map moduleStatusMap =
+            java.util.Collections.synchronizedMap(new java.util.LinkedHashMap());
 
-    /* Method name resolution cache: methodId -> {className, methodName}. Capped at 10000 entries. */
+    /* Method name resolution cache: methodId -> {className, methodName}.
+     * LRU eviction: oldest-accessed entry is removed when size exceeds MAX_METHOD_CACHE. */
     private static final int MAX_METHOD_CACHE = 10000;
-    private final Map<Long, String[]> methodNameCache = new ConcurrentHashMap<Long, String[]>();
+    private final Map<Long, String[]> methodNameCache = Collections.synchronizedMap(
+            new LinkedHashMap<Long, String[]>(16, 0.75f, true) {
+                protected boolean removeEldestEntry(Map.Entry<Long, String[]> eldest) {
+                    return size() > MAX_METHOD_CACHE;
+                }
+            });
 
     public AgentConnection(String host, int port, EventStore store) {
         this.host = host;
@@ -90,7 +96,11 @@ public class AgentConnection {
     public String getAgentHostname() { return agentHostname; }
     public Map<Long, String[]> getMethodNameCache() { return methodNameCache; }
     public String getJvmInfo() { return jvmInfo; }
-    public List<ModuleStatus> getModuleStatuses() { return moduleStatuses; }
+    public java.util.List getModuleStatuses() {
+        synchronized (moduleStatusMap) {
+            return new java.util.ArrayList(moduleStatusMap.values());
+        }
+    }
 
     public void sendCommand(int cmdSubtype, byte[] payload) throws IOException {
         if (!connected || outputStream == null) {
@@ -222,8 +232,11 @@ public class AgentConnection {
             case DEBUG_CLASS_BYTES:
                 processDebugClassBytes(msg);
                 break;
-            case FIELD_WATCH:
             case JVM_CONFIG:
+                processJvmConfig(msg);
+                if (diagnosticListener != null) diagnosticListener.onDiagnosticMessage(msg.getType(), msg);
+                break;
+            case FIELD_WATCH:
             case JMX_BROWSE:
             case THREAD_DUMP_MSG:
             case DEADLOCK_MSG:
@@ -231,9 +244,11 @@ public class AgentConnection {
                 /* These are handled via listeners set by DiagnosticToolsPanel */
                 if (diagnosticListener != null) diagnosticListener.onDiagnosticMessage(msg.getType(), msg);
                 break;
+            case JMX_DATA:
+                processJmxData(msg);
+                break;
             case CLASS_INFO:
             case MONITOR_EVENT:
-            case JMX_DATA:
             case FINALIZER:
             case THREAD_CPU:
             case JFR_EVENT:
@@ -360,7 +375,7 @@ public class AgentConnection {
         int moduleCount = msg.readU16(off);
         off += 2;
 
-        moduleStatuses.clear();
+        moduleStatusMap.clear();
         for (int i = 0; i < moduleCount && off + 4 <= msg.getPayloadLength(); i++) {
             String name = msg.readString(off);
             off += msg.stringFieldLength(off);
@@ -368,8 +383,7 @@ public class AgentConnection {
             off += 1;
             int maxLevel = msg.readU8(off);
             off += 1;
-            ModuleStatus ms = new ModuleStatus(name, currentLevel, maxLevel);
-            moduleStatuses.add(ms);
+            moduleStatusMap.put(name, new ModuleStatus(name, currentLevel, maxLevel));
         }
     }
 
@@ -384,18 +398,12 @@ public class AgentConnection {
         int maxLevel = msg.readU8(off + 2);
 
         /* Update tracked module status */
-        boolean found = false;
-        for (int i = 0; i < moduleStatuses.size(); i++) {
-            ModuleStatus ms = moduleStatuses.get(i);
-            if (ms.getName().equals(name)) {
-                ms.setCurrentLevel(newLevel);
-                ms.setMaxLevel(maxLevel);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            moduleStatuses.add(new ModuleStatus(name, newLevel, maxLevel));
+        ModuleStatus existing = (ModuleStatus) moduleStatusMap.get(name);
+        if (existing != null) {
+            existing.setCurrentLevel(newLevel);
+            existing.setMaxLevel(maxLevel);
+        } else {
+            moduleStatusMap.put(name, new ModuleStatus(name, newLevel, maxLevel));
         }
     }
 
@@ -409,6 +417,24 @@ public class AgentConnection {
 
         String exceptionClass = msg.readString(off);
         off += msg.stringFieldLength(off);
+
+        /* Message, cause class, cause message (added in v1.1.0) */
+        String message = "";
+        String causeClass = "";
+        String causeMessage = "";
+        if (off + 2 <= msg.getPayloadLength()) {
+            message = msg.readString(off);
+            off += msg.stringFieldLength(off);
+        }
+        if (off + 2 <= msg.getPayloadLength()) {
+            causeClass = msg.readString(off);
+            off += msg.stringFieldLength(off);
+        }
+        if (off + 2 <= msg.getPayloadLength()) {
+            causeMessage = msg.readString(off);
+            off += msg.stringFieldLength(off);
+        }
+
         String throwClass = msg.readString(off);
         off += msg.stringFieldLength(off);
         String throwMethod = msg.readString(off);
@@ -455,7 +481,8 @@ public class AgentConnection {
 
         store.storeException(new ExceptionEvent(
                 timestamp, totalThrown, totalCaught, totalDropped,
-                exceptionClass, throwClass, throwMethod, throwLocation,
+                exceptionClass, message, causeClass, causeMessage,
+                throwClass, throwMethod, throwLocation,
                 caught, catchClass, catchMethod, frames));
     }
 
@@ -477,6 +504,84 @@ public class AgentConnection {
         store.storeOsMetrics(new OsMetrics(
                 timestamp, fdCount, rssBytes, vmSizeBytes,
                 volCs, involCs, tcpEst, tcpCw, tcpTw, osThreads));
+    }
+
+    private void processJmxData(EventMessage msg) {
+        try {
+            if (msg.getPayloadLength() < 9) return;
+            int subtype = msg.readU8(0);
+            int off = 9; /* subtype(1) + timestamp(8) */
+
+            if (subtype == ProtocolConstants.JMX_MBEAN_LIST) {
+                if (off + 2 > msg.getPayloadLength()) return;
+                int count = msg.readU16(off); off += 2;
+                java.util.List<String> names = new java.util.ArrayList<String>(count);
+                for (int i = 0; i < count && off < msg.getPayloadLength(); i++) {
+                    String name = msg.readString(off);
+                    off += msg.stringFieldLength(off);
+                    if (name != null && name.length() > 0) names.add(name);
+                }
+                if (jmxListener != null) jmxListener.onMBeanList(names);
+            } else if (subtype == ProtocolConstants.JMX_MBEAN_ATTRS) {
+                String mbeanName = msg.readString(off);
+                off += msg.stringFieldLength(off);
+                java.util.List<String[]> attrs = new java.util.ArrayList<String[]>();
+                while (off + 2 <= msg.getPayloadLength()) {
+                    String key = msg.readString(off);
+                    off += msg.stringFieldLength(off);
+                    if (key == null || key.length() == 0) break; /* terminator */
+                    if (off + 2 > msg.getPayloadLength()) break;
+                    String val = msg.readString(off);
+                    off += msg.stringFieldLength(off);
+                    attrs.add(new String[]{key, val != null ? val : ""});
+                }
+                if (jmxListener != null) jmxListener.onMBeanAttributes(mbeanName, attrs);
+            }
+        } catch (Exception e) {
+            System.err.println("[JVMMonitor] processJmxData failed: " + e);
+        }
+    }
+
+    private void processJvmConfig(EventMessage msg) {
+        /* Wire format:
+         *   timestamp(8) + javaVersion(str) + vmName(str) + vmVendor(str)
+         *   + javaHome(str) + startTime(8) + uptime(8) + processors(4)
+         *   + vmArgCount(u16) + vmArgs[...] + sysPropCount(u16) + (key,val)[...]
+         * classpath and bootClassPath are intentionally omitted (too large).
+         */
+        try {
+            if (msg.getPayloadLength() < 8) return;
+            int off = 8; /* skip timestamp */
+            String javaVersion = msg.readString(off); off += msg.stringFieldLength(off);
+            String vmName = msg.readString(off); off += msg.stringFieldLength(off);
+            String vmVendor = msg.readString(off); off += msg.stringFieldLength(off);
+            String javaHome = msg.readString(off); off += msg.stringFieldLength(off);
+            long startTime = msg.readU64(off); off += 8;
+            long uptime = msg.readU64(off); off += 8;
+            int procs = msg.readI32(off); off += 4;
+
+            int vmArgCount = msg.readU16(off); off += 2;
+            String[] vmArgs = new String[vmArgCount];
+            for (int i = 0; i < vmArgCount && off < msg.getPayloadLength(); i++) {
+                vmArgs[i] = msg.readString(off);
+                off += msg.stringFieldLength(off);
+            }
+
+            int propCount = 0;
+            if (off + 2 <= msg.getPayloadLength()) {
+                propCount = msg.readU16(off); off += 2;
+            }
+            String[][] props = new String[propCount][2];
+            for (int i = 0; i < propCount && off < msg.getPayloadLength(); i++) {
+                props[i][0] = msg.readString(off); off += msg.stringFieldLength(off);
+                props[i][1] = msg.readString(off); off += msg.stringFieldLength(off);
+            }
+
+            store.storeJvmConfig(new JvmConfig(vmArgs, props, "", javaVersion,
+                    javaHome, vmName, vmVendor, startTime, uptime, procs, ""));
+        } catch (Exception e) {
+            System.err.println("[JVMMonitor] processJvmConfig failed: " + e);
+        }
     }
 
     private void processJitEvent(EventMessage msg) {
@@ -610,6 +715,14 @@ public class AgentConnection {
     }
 
     private void processNetwork(EventMessage msg) {
+        try {
+            processNetworkImpl(msg);
+        } catch (Exception e) {
+            System.err.println("[JVMMonitor] Network message parse error: " + e.getMessage());
+        }
+    }
+
+    private void processNetworkImpl(EventMessage msg) {
         /* Wire: timestamp(8) + 8 counters * i64(8) + socketCount(2) + per-socket(17 each) */
         if (msg.getPayloadLength() < 74) return;
         long timestamp = msg.readU64(0);
@@ -625,7 +738,7 @@ public class AgentConnection {
 
         int socketCount = msg.readU16(off); off += 2;
         java.util.List<NetworkSnapshot.SocketInfo> socketList = new java.util.ArrayList<NetworkSnapshot.SocketInfo>();
-        for (int i = 0; i < socketCount && off + 17 <= msg.getPayloadLength(); i++) {
+        for (int i = 0; i < socketCount && off + 21 <= msg.getPayloadLength(); i++) {
             long localAddr = msg.readU32(off); off += 4;
             int localPort = msg.readU16(off); off += 2;
             long remoteAddr = msg.readU32(off); off += 4;
@@ -773,6 +886,13 @@ public class AgentConnection {
 
     /** Send instrumentation configuration to agent. */
     public void sendInstrumentationConfig(String[] packages, String[] probes) throws java.io.IOException {
+        sendInstrumentationConfig(packages, probes, false, 500);
+    }
+
+    /** Send instrumentation configuration with param capture options. */
+    public void sendInstrumentationConfig(String[] packages, String[] probes,
+                                           boolean captureParams, int maxValueLength)
+            throws java.io.IOException {
         java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
         java.io.DataOutputStream dos = new java.io.DataOutputStream(baos);
         dos.writeShort(packages.length);
@@ -787,6 +907,9 @@ public class AgentConnection {
             dos.writeShort(b.length);
             dos.write(b);
         }
+        /* v1.1.0: capture params flag + max value length */
+        dos.writeByte(captureParams ? 1 : 0);
+        dos.writeInt(maxValueLength);
         dos.flush();
         sendCommand(ProtocolConstants.INSTR_CMD_CONFIGURE, baos.toByteArray());
     }
@@ -820,6 +943,29 @@ public class AgentConnection {
 
     public void setBreakpointListener(BreakpointListener l) { this.breakpointListener = l; }
     public void setClassBytesListener(ClassBytesListener l) { this.classBytesListener = l; }
+
+    /** JMX browser listener — set by JmxBrowserPanel. */
+    private volatile JmxListener jmxListener;
+    public interface JmxListener {
+        void onMBeanList(java.util.List<String> mbeanNames);
+        void onMBeanAttributes(String mbeanName, java.util.List<String[]> attrs);
+    }
+    public void setJmxListener(JmxListener l) { this.jmxListener = l; }
+
+    /** Request list of MBeans. Response via JmxListener.onMBeanList. */
+    public void jmxListMBeans() throws java.io.IOException {
+        sendCommand(ProtocolConstants.DIAG_CMD_JMX_LIST_MBEANS, new byte[0]);
+    }
+
+    /** Request attributes for an MBean. Response via JmxListener.onMBeanAttributes. */
+    public void jmxGetAttrs(String mbeanName) throws java.io.IOException {
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        java.io.DataOutputStream dos = new java.io.DataOutputStream(baos);
+        byte[] nb = mbeanName.getBytes("UTF-8");
+        dos.writeShort(nb.length);
+        dos.write(nb);
+        sendCommand(ProtocolConstants.DIAG_CMD_JMX_GET_ATTRS, baos.toByteArray());
+    }
 
     public void debugSetBreakpoint(String className, int lineNumber) throws java.io.IOException {
         java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
@@ -863,6 +1009,17 @@ public class AgentConnection {
         java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
         new java.io.DataOutputStream(baos).writeLong(threadId);
         sendCommand(ProtocolConstants.DEBUG_CMD_STEP_OUT, baos.toByteArray());
+    }
+
+    /** Request list of loaded classes matching a package prefix (e.g., "com.myapp"). */
+    public void listClasses(String packageFilter) throws java.io.IOException {
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        java.io.DataOutputStream dos = new java.io.DataOutputStream(baos);
+        byte[] pf = packageFilter != null ? packageFilter.getBytes("UTF-8") : new byte[0];
+        dos.writeShort(pf.length);
+        dos.write(pf);
+        dos.flush();
+        sendCommand(ProtocolConstants.DEBUG_CMD_LIST_CLASSES, baos.toByteArray());
     }
 
     public void debugGetClassBytes(String className) throws java.io.IOException {
@@ -947,11 +1104,34 @@ public class AgentConnection {
         int depth = 0;
         if (off + 4 <= msg.getPayloadLength()) { depth = msg.readI32(off); off += 4; }
         boolean isExc = false;
-        if (off + 1 <= msg.getPayloadLength()) { isExc = msg.readU8(off) != 0; }
+        if (off + 1 <= msg.getPayloadLength()) { isExc = msg.readU8(off) != 0; off += 1; }
+
+        /* Optional: paramsJson and returnValueJson (added in v1.1.0) */
+        String paramsJson = null;
+        String returnValueJson = null;
+        if (off + 2 <= msg.getPayloadLength()) {
+            paramsJson = msg.readString(off); off += msg.stringFieldLength(off);
+            if (paramsJson.length() == 0) paramsJson = null;
+        }
+        if (off + 2 <= msg.getPayloadLength()) {
+            returnValueJson = msg.readString(off); off += msg.stringFieldLength(off);
+            if (returnValueJson.length() == 0) returnValueJson = null;
+        }
+        /* Optional: resource counters (added in v1.1.1) */
+        long allocBytes = 0, blockedMs = 0, waitedMs = 0, cpuNs = 0;
+        if (off + 24 <= msg.getPayloadLength()) {
+            allocBytes = msg.readI64(off); off += 8;
+            blockedMs = msg.readI64(off); off += 8;
+            waitedMs = msg.readI64(off); off += 8;
+        }
+        if (off + 8 <= msg.getPayloadLength()) {
+            cpuNs = msg.readI64(off); off += 8;
+        }
 
         store.storeInstrumentationEvent(new InstrumentationEvent(
                 timestamp, eventType, threadId, threadName, className, methodName,
-                durationNanos, context, traceId, parentTraceId, depth, isExc));
+                durationNanos, context, traceId, parentTraceId, depth, isExc,
+                paramsJson, returnValueJson, allocBytes, blockedMs, waitedMs, cpuNs));
     }
 
     private void processQueueStats(EventMessage msg) {
@@ -1011,9 +1191,7 @@ public class AgentConnection {
             if (off + 2 > msg.getPayloadLength()) break;
             String methodName = msg.readString(off);
             off += msg.stringFieldLength(off);
-            if (methodNameCache.size() < MAX_METHOD_CACHE) {
-                methodNameCache.put(Long.valueOf(methodId), new String[]{className, methodName});
-            }
+            methodNameCache.put(Long.valueOf(methodId), new String[]{className, methodName});
         }
     }
 }

@@ -9,10 +9,10 @@
 
 struct gc_listener {
     jvmmon_agent_t *agent;
-    uint64_t        gc_start_nanos;
-    uint64_t        last_gc_end_nanos;
-    int32_t         gc_count;
-    int32_t         full_gc_count;
+    volatile uint64_t gc_start_nanos;
+    volatile uint64_t last_gc_end_nanos;
+    volatile int32_t  gc_count;
+    volatile int32_t  full_gc_count;
 };
 
 gc_listener_t *gc_listener_create(jvmmon_agent_t *agent);

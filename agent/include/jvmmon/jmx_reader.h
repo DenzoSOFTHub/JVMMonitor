@@ -22,6 +22,15 @@ typedef struct jmx_reader {
     char             subscribed[64][256];
     int              subscribed_count;
     jvmmon_mutex_t   lock;
+    /* JNI cache for CPU usage (resolved once, reused every poll) */
+    jclass     mf_global;         /* ManagementFactory global ref */
+    jmethodID  getOS;
+    jclass     os_class_global;   /* OperatingSystemMXBean class global ref */
+    jmethodID  getProcs;
+    jmethodID  getSystemCpu;      /* NULL if not available (non-Sun JVM) */
+    jmethodID  getProcessCpu;
+    jmethodID  getProcessCpuTime;
+    int        cpu_cached;
 } jmx_reader_t;
 
 jmx_reader_t *jmx_reader_create(jvmmon_agent_t *agent, int interval_ms);

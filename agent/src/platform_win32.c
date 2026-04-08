@@ -32,7 +32,8 @@ int jvmmon_socket_connect(jvmmon_socket_t sock, const char *host, int port) {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
-    _snprintf(port_str, sizeof(port_str), "%d", port);
+    _snprintf(port_str, sizeof(port_str) - 1, "%d", port);
+    port_str[sizeof(port_str) - 1] = '\0';
     ret = getaddrinfo(host, port_str, &hints, &res);
     if (ret != 0) return -1;
 

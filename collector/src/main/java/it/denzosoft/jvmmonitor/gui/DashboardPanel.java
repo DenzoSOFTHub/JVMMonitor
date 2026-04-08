@@ -39,7 +39,7 @@ public class DashboardPanel extends JPanel {
         setLayout(new BorderLayout(5, 5));
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
-        summaryLabel = new JLabel("JVMMonitor v1.0.0 — not connected");
+        summaryLabel = new JLabel("JVMMonitor v1.1.0 — not connected");
         summaryLabel.setFont(summaryLabel.getFont().deriveFont(Font.BOLD, 13f));
         add(summaryLabel, BorderLayout.NORTH);
 
@@ -69,9 +69,9 @@ public class DashboardPanel extends JPanel {
         diskChart.setShowLegend(true);
 
         /* ── Network ───────────────────────────── */
-        networkChart = new TimeSeriesChart("Network", "KB");
-        networkChart.defineSeries("Bytes In", new Color(50, 150, 50), true);
-        networkChart.defineSeries("Bytes Out", new Color(200, 130, 30), true);
+        networkChart = new TimeSeriesChart("Network", "seg/s");
+        networkChart.defineSeries("In", new Color(50, 150, 50), true);
+        networkChart.defineSeries("Out", new Color(200, 130, 30), true);
         networkChart.setShowLegend(true);
 
         /* ── Heap Usage ────────────────────────── */
@@ -102,11 +102,13 @@ public class DashboardPanel extends JPanel {
         add(alarmScroll, BorderLayout.SOUTH);
     }
 
-    public void refresh() {
+    public void updateData() {
+        if (collector.getStore() == null) return;
         long now = System.currentTimeMillis();
 
         /* ── Thread states ──────────────────────── */
         List<ThreadInfo> threads = collector.getStore().getLatestThreadInfo();
+        if (threads == null) threads = new ArrayList<ThreadInfo>();
         int runnable = 0, blocked = 0, waiting = 0, timedWait = 0;
         for (int i = 0; i < threads.size(); i++) {
             switch (threads.get(i).getState()) {
@@ -162,37 +164,32 @@ public class DashboardPanel extends JPanel {
         diskChart.setSeriesData("Vol CtxSw", volPts);
         diskChart.setSeriesData("Invol CtxSw", involPts);
 
-        /* ── Network (bytes in/out delta per interval) ── */
+        /* ── Network — segment rate from aggregate TCP counters (/proc/self/net/snmp).
+         * Per-socket bytes are not available via /proc, so we show inSegs/outSegs
+         * delta per second which is always populated by the network module. */
         List<NetworkSnapshot> netHistory = collector.getStore().getNetworkHistory(from, now);
         List<long[]> inPts = new ArrayList<long[]>();
         List<long[]> outPts = new ArrayList<long[]>();
-        long prevIn = -1, prevOut = -1;
+        long prevInSegs = -1, prevOutSegs = -1, prevTs = 0;
         for (int i = 0; i < netHistory.size(); i++) {
             NetworkSnapshot n = netHistory.get(i);
-            long totalIn = 0, totalOut = 0;
-            NetworkSnapshot.SocketInfo[] sockets = n.getSockets();
-            if (sockets != null) {
-                for (int s = 0; s < sockets.length; s++) {
-                    if (sockets[s] != null) {
-                        totalIn += sockets[s].bytesIn;
-                        totalOut += sockets[s].bytesOut;
-                    }
-                }
-            }
-            /* Show delta (bytes transferred since last snapshot), not cumulative */
-            if (prevIn >= 0) {
-                long deltaIn = totalIn - prevIn;
-                long deltaOut = totalOut - prevOut;
+            long inSegs = n.getInSegments();
+            long outSegs = n.getOutSegments();
+            if (prevInSegs >= 0 && n.getTimestamp() > prevTs) {
+                double dtSec = (n.getTimestamp() - prevTs) / 1000.0;
+                long deltaIn = inSegs - prevInSegs;
+                long deltaOut = outSegs - prevOutSegs;
                 if (deltaIn < 0) deltaIn = 0;
                 if (deltaOut < 0) deltaOut = 0;
-                inPts.add(TimeSeriesChart.point(n.getTimestamp(), deltaIn / 1024.0));
-                outPts.add(TimeSeriesChart.point(n.getTimestamp(), deltaOut / 1024.0));
+                inPts.add(TimeSeriesChart.point(n.getTimestamp(), deltaIn / dtSec));
+                outPts.add(TimeSeriesChart.point(n.getTimestamp(), deltaOut / dtSec));
             }
-            prevIn = totalIn;
-            prevOut = totalOut;
+            prevInSegs = inSegs;
+            prevOutSegs = outSegs;
+            prevTs = n.getTimestamp();
         }
-        networkChart.setSeriesData("Bytes In", inPts);
-        networkChart.setSeriesData("Bytes Out", outPts);
+        networkChart.setSeriesData("In", inPts);
+        networkChart.setSeriesData("Out", outPts);
 
         /* ── Heap Usage ─────────────────────────── */
         List<MemorySnapshot> memHistory = collector.getStore().getMemorySnapshots(from, now);
@@ -275,6 +272,15 @@ public class DashboardPanel extends JPanel {
             alarmListModel.addElement(AlarmEvent.severityToString(a.getSeverity()) +
                     " " + a.getMessage());
         }
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     private static class AlarmCellRenderer extends DefaultListCellRenderer {

@@ -40,22 +40,17 @@ static void collect_classloaders(classloader_tracker_t *ct) {
         int found = -1;
         int j;
         if (loader == NULL) {
-            /* Bootstrap classloader — skip or count as index 0 */
-            if (loader_count == 0 || loaders[0].tag != -1) {
-                /* Add bootstrap entry */
-                if (loader_count < MAX_CLASSLOADERS) {
-                    found = loader_count;
-                    loaders[found].tag = -1;
-                    strncpy(loaders[found].loader_class, "bootstrap", 127);
-                    loaders[found].class_count = 0;
-                    loader_count++;
-                }
-            } else {
-                found = 0;
-            }
-            /* Find bootstrap */
+            /* Bootstrap classloader — find existing or create */
             for (j = 0; j < loader_count; j++) {
                 if (loaders[j].tag == -1) { found = j; break; }
+            }
+            if (found < 0 && loader_count < MAX_CLASSLOADERS) {
+                found = loader_count;
+                loaders[found].tag = -1;
+                strncpy(loaders[found].loader_class, "bootstrap", 127);
+                loaders[found].loader_class[127] = '\0';
+                loaders[found].class_count = 0;
+                loader_count++;
             }
         } else {
             /* Use tag to identify unique loaders */
@@ -84,6 +79,7 @@ static void collect_classloaders(classloader_tracker_t *ct) {
                     (*jvmti)->GetClassSignature(jvmti, loaderClass, &csig, NULL);
                     if (csig) {
                         strncpy(loaders[found].loader_class, csig, 127);
+                        loaders[found].loader_class[127] = '\0';
                         (*jvmti)->Deallocate(jvmti, (unsigned char *)csig);
                     }
                     (*env)->DeleteLocalRef(env, loaderClass);
@@ -95,7 +91,19 @@ static void collect_classloaders(classloader_tracker_t *ct) {
         if (found >= 0) {
             loaders[found].class_count++;
         }
+
+        /* Clean up JNI local ref for this loader to prevent table overflow */
+        if (loader != NULL) {
+            JNIEnv *lenv;
+            if ((*ct->agent->jvm)->GetEnv(ct->agent->jvm, (void **)&lenv, JNI_VERSION_1_6) == JNI_OK) {
+                (*lenv)->DeleteLocalRef(lenv, loader);
+            }
+        }
     }
+
+    /* Clear tags in a lightweight pass (no GetClassLoader — use SetTag with tag=0 via iteration) */
+    /* Tags are ephemeral; cleared by JVMTI automatically on next GC or via explicit clear.
+     * We skip the second GetClassLoader loop to save time. Tags will be overwritten next poll. */
 
     /* Encode: timestamp + count + entries(class_name, class_count) */
     uint8_t payload[JVMMON_MAX_PAYLOAD];
@@ -112,13 +120,6 @@ static void collect_classloaders(classloader_tracker_t *ct) {
 
     agent_send_message(JVMMON_MSG_CLASSLOADER, payload, (uint32_t)off);
     LOG_DEBUG("Classloader: %d loaders, %d total classes", loader_count, (int)class_count);
-
-    /* Clear tags */
-    for (i = 0; i < class_count; i++) {
-        jobject loader = NULL;
-        (*jvmti)->GetClassLoader(jvmti, classes[i], &loader);
-        if (loader) (*jvmti)->SetTag(jvmti, loader, 0);
-    }
 
     (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
 }

@@ -38,6 +38,7 @@ struct module_registry {
 };
 
 module_registry_t *module_registry_create(jvmmon_agent_t *agent);
+void module_registry_deactivate_all(module_registry_t *mr);
 void module_registry_destroy(module_registry_t *mr);
 
 /* Register a module */

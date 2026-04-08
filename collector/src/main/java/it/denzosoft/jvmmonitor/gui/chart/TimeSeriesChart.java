@@ -123,7 +123,12 @@ public class TimeSeriesChart extends JPanel {
     }
 
     public void defineSeries(String name, Color color, boolean fill) {
-        seriesMap.put(name, new SeriesData(name, color, fill));
+        seriesMap.put(name, new SeriesData(name, color, fill, false));
+    }
+
+    /** Define a series with optional dashed line style (for averages). */
+    public void defineSeries(String name, Color color, boolean fill, boolean dashed) {
+        seriesMap.put(name, new SeriesData(name, color, fill, dashed));
     }
 
     public void clearAllData() {
@@ -298,9 +303,14 @@ public class TimeSeriesChart extends JPanel {
                              long minTs, long tsRange, double maxY) {
         List<long[]> pts = sd.points;
 
-        /* Line */
+        /* Line — dashed for average series */
         g2.setColor(sd.color);
-        g2.setStroke(new BasicStroke(2f));
+        if (sd.dashed) {
+            g2.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_BEVEL, 0, new float[]{6, 4}, 0));
+        } else {
+            g2.setStroke(new BasicStroke(2f));
+        }
 
         int[] xArr = new int[pts.size()];
         int[] yArr = new int[pts.size()];
@@ -349,12 +359,14 @@ public class TimeSeriesChart extends JPanel {
         final String name;
         final Color color;
         final boolean fill;
+        final boolean dashed;
         final List<long[]> points = new ArrayList<long[]>();
 
-        SeriesData(String name, Color color, boolean fill) {
+        SeriesData(String name, Color color, boolean fill, boolean dashed) {
             this.name = name;
             this.color = color;
             this.fill = fill;
+            this.dashed = dashed;
         }
     }
 }

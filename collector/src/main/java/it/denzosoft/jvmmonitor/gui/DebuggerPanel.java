@@ -196,9 +196,12 @@ public class DebuggerPanel extends JPanel {
         /* Source viewer sub-tab */
         SourceViewerPanel sourceViewer = new SourceViewerPanel(collector);
 
+        ClassBrowserPanel classBrowser = new ClassBrowserPanel(collector);
+
         JTabbedPane mainTabs = new JTabbedPane();
         mainTabs.addTab("Debug", debugSplit);
         mainTabs.addTab("Source Viewer", sourceViewer);
+        mainTabs.addTab("Class Browser", classBrowser);
         add(mainTabs, BorderLayout.CENTER);
 
         /* Register breakpoint listener */
@@ -226,12 +229,21 @@ public class DebuggerPanel extends JPanel {
         }
     }
 
-    public void refresh() {
+    public void updateData() {
         /* Re-register listeners if connection changed */
         AgentConnection conn = collector.getConnection();
         if (conn != null && conn.isConnected()) {
             setupListeners();
         }
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     private void toggleDebugger() {
@@ -470,6 +482,7 @@ public class DebuggerPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.length) return "";
             BreakpointHit.DebugVariable v = data[row];
             switch (col) {
                 case 0: return v.name;
@@ -490,6 +503,7 @@ public class DebuggerPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= breakpoints.size()) return "";
             String[] bp = breakpoints.get(row);
             switch (col) {
                 case 0: return bp[0].replace('/', '.');

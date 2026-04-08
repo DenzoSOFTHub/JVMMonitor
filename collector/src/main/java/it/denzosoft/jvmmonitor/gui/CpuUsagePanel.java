@@ -35,6 +35,10 @@ public class CpuUsagePanel extends JPanel {
     private CpuUsageSnapshot previousSnapshot = null;
     private final Map<Long, Long> prevThreadCpuTime = new LinkedHashMap<Long, Long>();
 
+    /* Top process CPU history for headroom chart */
+    private final List[] procCpuHist = new List[5];
+    private static final int MAX_PROC_HIST = 150;
+
     /* Spike detection */
     private double cpuSpikeThreshold = 80.0; /* % */
     private final List<String> spikeLog = new ArrayList<String>();
@@ -54,15 +58,20 @@ public class CpuUsagePanel extends JPanel {
         cpuChart = new TimeSeriesChart("CPU Usage (5 min)", "%");
         cpuChart.defineSeries("System Total", new Color(200, 80, 80), false);
         cpuChart.defineSeries("JVM Process", new Color(30, 130, 200), true);
-        cpuChart.defineSeries("System Avg(5)", new Color(180, 50, 50), false);
-        cpuChart.defineSeries("JVM Avg(5)", new Color(20, 80, 180), false);
+        cpuChart.defineSeries("System Avg(5)", new Color(180, 50, 50), false, true);
+        cpuChart.defineSeries("JVM Avg(5)", new Color(20, 80, 180), false, true);
         cpuChart.setFixedMaxY(100);
 
-        headroomChart = new TimeSeriesChart("CPU Available (5 min)", "%");
+        headroomChart = new TimeSeriesChart("CPU Breakdown (5 min)", "%");
         headroomChart.defineSeries("Available", new Color(50, 180, 50), true);
         headroomChart.defineSeries("JVM", new Color(30, 130, 200), true);
-        headroomChart.defineSeries("Other", new Color(200, 150, 50), true);
+        headroomChart.defineSeries("Proc #1", new Color(220, 60, 60), false);
+        headroomChart.defineSeries("Proc #2", new Color(200, 130, 30), false);
+        headroomChart.defineSeries("Proc #3", new Color(150, 80, 200), false);
+        headroomChart.defineSeries("Proc #4", new Color(180, 140, 50), false);
+        headroomChart.defineSeries("Proc #5", new Color(100, 160, 100), false);
         headroomChart.setFixedMaxY(100);
+        headroomChart.setShowLegend(true);
 
         JPanel chartsRow = new JPanel(new GridLayout(1, 2, 5, 0));
         chartsRow.add(cpuChart);
@@ -105,6 +114,8 @@ public class CpuUsagePanel extends JPanel {
                 "CPU Spike Log (auto-captured when system CPU > 80%)"));
         bottomTabs.addTab("Spike Log", spikeScroll);
 
+        for (int pi = 0; pi < 5; pi++) procCpuHist[pi] = new java.util.ArrayList();
+
         final JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chartsRow, bottomTabs);
         split.setResizeWeight(0.5);
         split.addComponentListener(new java.awt.event.ComponentAdapter() {
@@ -115,7 +126,7 @@ public class CpuUsagePanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
 
@@ -126,7 +137,6 @@ public class CpuUsagePanel extends JPanel {
         List<long[]> jvmProc = new ArrayList<long[]>();
         List<long[]> available = new ArrayList<long[]>();
         List<long[]> jvmShare = new ArrayList<long[]>();
-        List<long[]> otherShare = new ArrayList<long[]>();
 
         for (int i = 0; i < history.size(); i++) {
             CpuUsageSnapshot s = history.get(i);
@@ -134,9 +144,6 @@ public class CpuUsagePanel extends JPanel {
             jvmProc.add(TimeSeriesChart.point(s.getTimestamp(), s.getProcessCpuPercent()));
             available.add(TimeSeriesChart.point(s.getTimestamp(), s.getAvailableCpuPercent()));
             jvmShare.add(TimeSeriesChart.point(s.getTimestamp(), s.getProcessCpuPercent()));
-            double other = s.getSystemCpuPercent() - s.getProcessCpuPercent();
-            if (other < 0) other = 0;
-            otherShare.add(TimeSeriesChart.point(s.getTimestamp(), other));
         }
 
         /* Moving average over 5 periods */
@@ -149,7 +156,22 @@ public class CpuUsagePanel extends JPanel {
         cpuChart.setSeriesData("JVM Avg(5)", jvmAvg);
         headroomChart.setSeriesData("Available", available);
         headroomChart.setSeriesData("JVM", jvmShare);
-        headroomChart.setSeriesData("Other", otherShare);
+
+        /* Top 5 processes by CPU (from ProcessInfo, accumulated in history buffer) */
+        it.denzosoft.jvmmonitor.model.ProcessInfo procInfo = collector.getStore().getLatestProcessInfo();
+        if (procInfo != null) {
+            it.denzosoft.jvmmonitor.model.ProcessInfo.ProcessEntry[] procs = procInfo.getTopProcesses();
+            if (procs != null) {
+                int top = Math.min(procs.length, 5);
+                for (int pi = 0; pi < 5; pi++) {
+                    if (pi < top && procs[pi] != null) {
+                        procCpuHist[pi].add(TimeSeriesChart.point(now, procs[pi].cpuPercent));
+                    }
+                    while (procCpuHist[pi].size() > MAX_PROC_HIST) procCpuHist[pi].remove(0);
+                    headroomChart.setSeriesData("Proc #" + (pi + 1), procCpuHist[pi]);
+                }
+            }
+        }
 
         /* Latest snapshot */
         CpuUsageSnapshot latest = collector.getStore().getLatestCpuUsage();
@@ -269,6 +291,15 @@ public class CpuUsagePanel extends JPanel {
             spikeArea.setText(sb.toString());
             spikeArea.setCaretPosition(0);
         }
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     /* ── Moving average helper ────────────────────── */

@@ -15,7 +15,8 @@ public class DecompilerBridge {
 
     private final DenzoDecompiler decompiler = new DenzoDecompiler();
 
-    /** Cache of decompiled sources: className -> DecompiledSource */
+    /** Cache of decompiled sources: className -> DecompiledSource. Capped at 100 entries. */
+    private static final int MAX_CACHE_SIZE = 100;
     private final Map<String, DecompiledSource> cache = new LinkedHashMap<String, DecompiledSource>();
 
     /**
@@ -42,6 +43,11 @@ public class DecompilerBridge {
 
         DecompiledSource result = new DecompiledSource(
                 internalName, collector.sb.toString(), collector.lineMap);
+        if (cache.size() >= MAX_CACHE_SIZE) {
+            /* Evict oldest entry instead of clearing all */
+            java.util.Iterator it = cache.keySet().iterator();
+            if (it.hasNext()) { it.next(); it.remove(); }
+        }
         cache.put(internalName, result);
         return result;
     }

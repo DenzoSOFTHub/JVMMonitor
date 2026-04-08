@@ -24,6 +24,7 @@ public class NetworkPanel extends JPanel {
 
     private final JVMMonitorCollector collector;
     private final JLabel summaryLabel;
+    private final ModuleActivationBar moduleBar;
     private final TimeSeriesChart trafficChart;
     private final TimeSeriesChart retransChart;
     private final SocketTableModel socketModel;
@@ -34,9 +35,13 @@ public class NetworkPanel extends JPanel {
         setLayout(new BorderLayout(5, 5));
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
+        JPanel northPanel = new JPanel(new BorderLayout());
+        moduleBar = new ModuleActivationBar(collector, "network", "Network", 1);
+        northPanel.add(moduleBar, BorderLayout.NORTH);
         summaryLabel = new JLabel("Network: no data");
         summaryLabel.setFont(summaryLabel.getFont().deriveFont(Font.BOLD, 13f));
-        add(summaryLabel, BorderLayout.NORTH);
+        northPanel.add(summaryLabel, BorderLayout.SOUTH);
+        add(northPanel, BorderLayout.NORTH);
 
         /* Charts row */
         trafficChart = new TimeSeriesChart("TCP Segments (5 min)", "segs");
@@ -85,9 +90,10 @@ public class NetworkPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
+        moduleBar.setDataReceived(collector.getStore().getLatestNetworkSnapshot() != null);
 
         /* Chart data from history */
         List<NetworkSnapshot> history = collector.getStore().getNetworkHistory(from, now);
@@ -173,6 +179,15 @@ public class NetworkPanel extends JPanel {
         alertArea.setText(alerts.length() > 0 ? alerts.toString() : "No connection issues detected.");
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     /* ── Socket Table Model ──────────────────────────── */
 
     private static class SocketTableModel extends AbstractTableModel {
@@ -198,7 +213,7 @@ public class NetworkPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            if (row >= data.length || data[row] == null) return "";
+            if (row < 0 || row >= data.length || data[row] == null) return "";
             SocketInfo s = data[row];
             switch (col) {
                 case 0: return s.getDirection();

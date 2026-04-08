@@ -44,9 +44,10 @@ public final class CsvExporter {
         fc.setSelectedFile(new File("export.csv"));
         if (fc.showSaveDialog(table) != JFileChooser.APPROVE_OPTION) return;
 
+        FileWriter fw = null;
         try {
             TableModel model = table.getModel();
-            FileWriter fw = new FileWriter(fc.getSelectedFile());
+            fw = new FileWriter(fc.getSelectedFile());
 
             /* Header */
             for (int c = 0; c < model.getColumnCount(); c++) {
@@ -66,10 +67,13 @@ public final class CsvExporter {
                 fw.write('\n');
             }
             fw.close();
+            fw = null;
             JOptionPane.showMessageDialog(table,
                     "Exported " + table.getRowCount() + " rows to " + fc.getSelectedFile().getName());
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(table, "Export failed: " + ex.getMessage());
+        } finally {
+            if (fw != null) { try { fw.close(); } catch (Exception ignored) {} }
         }
     }
 

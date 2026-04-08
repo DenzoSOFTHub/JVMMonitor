@@ -36,6 +36,8 @@ public class MainFrame extends JFrame {
     private final InstrumentationPanel instrumentationPanel;
     private final DebuggerPanel debuggerPanel;
     private final DiagnosticToolsPanel diagnosticToolsPanel;
+    private final JmxBrowserPanel jmxBrowserPanel;
+    private final SettingsPanel settingsPanel;
 
     /* Toolbar */
     private final JButton connectBtn;
@@ -43,7 +45,7 @@ public class MainFrame extends JFrame {
     private final JButton disconnectBtn;
 
     public MainFrame() {
-        super("JVMMonitor v1.0.0");
+        super("JVMMonitor v1.1.0");
         collector = new JVMMonitorCollector();
 
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
@@ -93,9 +95,21 @@ public class MainFrame extends JFrame {
             }
         });
 
+        JButton demoBtn = new JButton("Demo Agent");
+        demoBtn.setToolTipText("Launch an in-process demo agent and connect to it");
+        demoBtn.setBackground(new Color(70, 150, 90));
+        demoBtn.setForeground(Color.WHITE);
+        demoBtn.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                launchDemoAgent();
+            }
+        });
+
         toolbar.add(connectBtn);
         toolbar.add(attachBtn);
         toolbar.add(disconnectBtn);
+        toolbar.addSeparator();
+        toolbar.add(demoBtn);
         toolbar.addSeparator();
         toolbar.add(refreshBtn);
         add(toolbar, BorderLayout.NORTH);
@@ -118,6 +132,8 @@ public class MainFrame extends JFrame {
         instrumentationPanel = new InstrumentationPanel(collector);
         debuggerPanel = new DebuggerPanel(collector);
         diagnosticToolsPanel = new DiagnosticToolsPanel(collector);
+        jmxBrowserPanel = new JmxBrowserPanel(collector);
+        settingsPanel = new SettingsPanel(collector);
 
         /* Add JIT, Sources, Modules, Diagnostics as sub-tabs in their parent panels */
         addJitToSystem();
@@ -140,6 +156,8 @@ public class MainFrame extends JFrame {
         tabs.addTab("System", systemResourcesPanel);
         tabs.addTab("Debugger", debuggerPanel);
         tabs.addTab("Tools", diagnosticToolsPanel);
+        tabs.addTab("JMX Browser", jmxBrowserPanel);
+        tabs.addTab("Settings", settingsPanel);
 
         add(tabs, BorderLayout.CENTER);
 
@@ -159,6 +177,15 @@ public class MainFrame extends JFrame {
             }
         });
         refreshTimer.start();
+
+        /* Wire settings panel refresh interval callback */
+        settingsPanel.setOnRefreshIntervalChanged(new Runnable() {
+            public void run() {
+                int interval = settingsPanel.getRefreshInterval();
+                refreshTimer.setDelay(interval);
+                refreshTimer.setInitialDelay(interval);
+            }
+        });
     }
 
     /* Merge JIT into System tab */
@@ -182,42 +209,58 @@ public class MainFrame extends JFrame {
         /* DiagnosticsPanel will be a sub-tab in Tools */
     }
 
+    /** All panels that need periodic data updates. */
+    private Object[] allPanels;
+
+    private Object[] getAllPanels() {
+        if (allPanels == null) {
+            allPanels = new Object[]{
+                dashboardPanel, memoryGcPanel, gcAnalysisPanel, threadContentionPanel,
+                exceptionPanel, networkPanel, integrationPanel, messagingPanel,
+                lockAnalysisPanel, cpuUsagePanel, cpuProfilerPanel, instrumentationPanel,
+                systemResourcesPanel, debuggerPanel, diagnosticToolsPanel,
+                jmxBrowserPanel, settingsPanel
+            };
+        }
+        return allPanels;
+    }
+
     private void refreshAll() {
         try {
             updateConnectionStatus();
-            safeRefresh(dashboardPanel);
-            int selected = tabs.getSelectedIndex();
-            if (selected < 0) return;
-            Component selectedComp = tabs.getComponentAt(selected);
-            if (selectedComp == memoryGcPanel) safeRefresh(memoryGcPanel);
-            else if (selectedComp == gcAnalysisPanel) safeRefresh(gcAnalysisPanel);
-            else if (selectedComp == threadContentionPanel) safeRefresh(threadContentionPanel);
-            else if (selectedComp == exceptionPanel) safeRefresh(exceptionPanel);
-            else if (selectedComp == networkPanel) safeRefresh(networkPanel);
-            else if (selectedComp == integrationPanel) safeRefresh(integrationPanel);
-            else if (selectedComp == messagingPanel) safeRefresh(messagingPanel);
-            else if (selectedComp == lockAnalysisPanel) safeRefresh(lockAnalysisPanel);
-            else if (selectedComp == cpuUsagePanel) safeRefresh(cpuUsagePanel);
-            else if (selectedComp == systemResourcesPanel) safeRefresh(systemResourcesPanel);
-            else if (selectedComp == cpuProfilerPanel) safeRefresh(cpuProfilerPanel);
-            else if (selectedComp == instrumentationPanel) safeRefresh(instrumentationPanel);
-            else if (selectedComp == debuggerPanel) safeRefresh(debuggerPanel);
-            else if (selectedComp == diagnosticToolsPanel) safeRefresh(diagnosticToolsPanel);
+
+            /* Update ALL panels — data + rendering.
+             * updateData() feeds charts/tables with fresh data from EventStore.
+             * Swing components repaint automatically when their model changes
+             * (setText, fireTableDataChanged, setSeriesData, addSnapshot, etc.)
+             * so all panels stay current even when not visible. */
+            Object[] panels = getAllPanels();
+            for (int i = 0; i < panels.length; i++) {
+                safeCall(panels[i], "updateData");
+            }
         } catch (Exception e) {
-            /* Prevent EDT crash — log and continue */
             System.err.println("[JVMMonitor] Refresh error: " + e.getMessage());
         }
     }
 
-    /** Safely refresh a panel, catching exceptions to prevent EDT crash. */
-    private interface Refreshable { void refresh(); }
-    private void safeRefresh(final Object panel) {
+    /**
+     * Call a method by name on a panel. Falls back to "refresh" if the
+     * specific method doesn't exist (backwards compatibility).
+     */
+    private void safeCall(final Object panel, String methodName) {
         try {
-            java.lang.reflect.Method m = panel.getClass().getMethod("refresh");
+            java.lang.reflect.Method m = panel.getClass().getMethod(methodName);
             m.invoke(panel);
+        } catch (NoSuchMethodException e) {
+            /* Panel doesn't have this method — try "refresh" as fallback */
+            if (!"refresh".equals(methodName)) {
+                try {
+                    java.lang.reflect.Method fallback = panel.getClass().getMethod("refresh");
+                    fallback.invoke(panel);
+                } catch (Exception ex) { /* ignore */ }
+            }
         } catch (Exception e) {
-            /* Panel refresh failed — log silently, don't crash EDT */
-            System.err.println("[JVMMonitor] Panel refresh failed (" +
+            System.err.println("[JVMMonitor] Panel " + methodName + " failed (" +
                     panel.getClass().getSimpleName() + "): " + e.getMessage());
         }
     }
@@ -234,10 +277,16 @@ public class MainFrame extends JFrame {
             statusLabel.setText(" Connected to PID " + conn.getAgentPid());
             statusLabel.setForeground(new Color(0, 128, 0));
             agentInfoLabel.setText(conn.getJvmInfo() + " @ " + conn.getAgentHostname() + " ");
+            if (!refreshTimer.isRunning()) {
+                refreshTimer.start();
+            }
         } else {
             statusLabel.setText(" Not connected");
             statusLabel.setForeground(Color.RED);
             agentInfoLabel.setText("");
+            if (refreshTimer.isRunning()) {
+                refreshTimer.stop();
+            }
         }
     }
 
@@ -287,6 +336,73 @@ public class MainFrame extends JFrame {
         }
     }
 
+    /* Background demo agent server — kept across clicks so a single instance runs. */
+    private volatile it.denzosoft.jvmmonitor.demo.DemoAgent demoAgentInstance;
+    private volatile int demoAgentPort;
+    private volatile boolean demoConnecting;
+
+    private void launchDemoAgent() {
+        if (collector.getConnection() != null && collector.getConnection().isConnected()) {
+            int choice = JOptionPane.showConfirmDialog(this,
+                    "Already connected to an agent. Disconnect and start the demo?",
+                    "Demo Agent", JOptionPane.YES_NO_OPTION);
+            if (choice != JOptionPane.YES_OPTION) return;
+            collector.disconnect();
+        }
+
+        /* Start the DemoAgent server on a free port if not already running. */
+        if (demoAgentInstance == null) {
+            try {
+                java.net.ServerSocket probe = new java.net.ServerSocket(0);
+                demoAgentPort = probe.getLocalPort();
+                probe.close();
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "Cannot find a free port: " + ex.getMessage(),
+                        "Demo Agent", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            demoAgentInstance = new it.denzosoft.jvmmonitor.demo.DemoAgent(demoAgentPort);
+            Thread t = new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        demoAgentInstance.run();
+                    } catch (Exception ex) {
+                        System.err.println("[JVMMonitor] Demo agent error: " + ex.getMessage());
+                    }
+                }
+            }, "jvmmonitor-demo-agent");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        if (demoConnecting) return; /* guard against multiple clicks */
+        demoConnecting = true;
+        final int port = demoAgentPort;
+        /* Give the server a moment to bind, then connect. */
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    Thread.sleep(300);
+                    collector.connect("127.0.0.1", port);
+                    Thread.sleep(500);
+                    SwingUtilities.invokeLater(new Runnable() {
+                        public void run() { updateConnectionStatus(); demoConnecting = false; }
+                    });
+                } catch (final Exception ex) {
+                    demoConnecting = false;
+                    SwingUtilities.invokeLater(new Runnable() {
+                        public void run() {
+                            JOptionPane.showMessageDialog(MainFrame.this,
+                                    "Demo agent connect failed: " + ex.getMessage(),
+                                    "Demo Agent", JOptionPane.ERROR_MESSAGE);
+                        }
+                    });
+                }
+            }
+        }, "jvmmonitor-demo-connect").start();
+    }
+
     private void showAttachDialog() {
         AttachDialog dialog = new AttachDialog(this, collector);
         dialog.setVisible(true);
@@ -295,6 +411,13 @@ public class MainFrame extends JFrame {
 
     private void shutdown() {
         refreshTimer.stop();
+        settingsPanel.setOnRefreshIntervalChanged(null);
+        if (demoAgentInstance != null) {
+            try {
+                /* DemoAgent.run() blocks on accept(); closing instance stops it */
+                demoAgentInstance = null;
+            } catch (Exception ignored) {}
+        }
         collector.disconnect();
         dispose();
         System.exit(0);

@@ -19,9 +19,9 @@ typedef struct {
 } ring_slot_t;
 
 typedef struct {
-    volatile int32_t head;      /* next write position (producer) */
+    volatile uint32_t head;     /* next write position (producer) — unsigned to wrap safely at 2^32 */
     char pad1[60];              /* cache line padding */
-    volatile int32_t tail;      /* next read position (consumer) */
+    volatile uint32_t tail;     /* next read position (consumer) */
     char pad2[60];              /* cache line padding */
     volatile int32_t dropped;   /* dropped message count */
     ring_slot_t *slots;         /* heap-allocated slot array */

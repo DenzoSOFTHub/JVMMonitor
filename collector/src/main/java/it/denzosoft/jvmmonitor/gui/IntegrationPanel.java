@@ -65,7 +65,7 @@ public class IntegrationPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         NetworkSnapshot snapshot = collector.getStore().getLatestNetworkSnapshot();
         if (snapshot == null) return;
 
@@ -194,6 +194,15 @@ public class IntegrationPanel extends JPanel {
         trafficChart.setSeriesData("Outbound", outPts);
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     private static String ipToString(long addr) {
         if (addr == 0) return "0.0.0.0";
         return (addr & 0xFF) + "." + ((addr >> 8) & 0xFF) + "." +
@@ -247,6 +256,7 @@ public class IntegrationPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.size()) return "";
             IntegrationEntry e = data.get(row);
             switch (col) {
                 case 0: return e.remoteIP;

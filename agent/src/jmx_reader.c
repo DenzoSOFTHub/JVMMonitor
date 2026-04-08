@@ -89,6 +89,91 @@ cleanup:
     (*env)->DeleteLocalRef(env, server);
 }
 
+/**
+ * Send MSG_CPU_USAGE (0xBF) in the format the collector expects.
+ * Uses OperatingSystemMXBean for system/process CPU.
+ */
+static int ensure_cpu_cached(jmx_reader_t *jr, JNIEnv *env) {
+    if (jr->cpu_cached) return 1;
+
+    jclass mf = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
+    if (mf == NULL) { (*env)->ExceptionClear(env); return 0; }
+    jr->mf_global = (jclass)(*env)->NewGlobalRef(env, mf);
+    (*env)->DeleteLocalRef(env, mf);
+
+    jr->getOS = (*env)->GetStaticMethodID(env, jr->mf_global,
+        "getOperatingSystemMXBean", "()Ljava/lang/management/OperatingSystemMXBean;");
+    if (jr->getOS == NULL) { (*env)->ExceptionClear(env); return 0; }
+
+    jobject osBean = (*env)->CallStaticObjectMethod(env, jr->mf_global, jr->getOS);
+    if (osBean == NULL) return 0;
+
+    jclass osClass = (*env)->GetObjectClass(env, osBean);
+    jr->os_class_global = (jclass)(*env)->NewGlobalRef(env, osClass);
+    (*env)->DeleteLocalRef(env, osClass);
+    (*env)->DeleteLocalRef(env, osBean);
+
+    jr->getProcs = (*env)->GetMethodID(env, jr->os_class_global, "getAvailableProcessors", "()I");
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+    /* These may not exist on non-Sun JVMs — graceful NULL */
+    jr->getSystemCpu = (*env)->GetMethodID(env, jr->os_class_global, "getSystemCpuLoad", "()D");
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); jr->getSystemCpu = NULL; }
+    jr->getProcessCpu = (*env)->GetMethodID(env, jr->os_class_global, "getProcessCpuLoad", "()D");
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); jr->getProcessCpu = NULL; }
+    jr->getProcessCpuTime = (*env)->GetMethodID(env, jr->os_class_global, "getProcessCpuTime", "()J");
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); jr->getProcessCpuTime = NULL; }
+
+    jr->cpu_cached = 1;
+    LOG_DEBUG("JMX CPU cache initialized (sysCpu=%s, procCpu=%s, cpuTime=%s)",
+              jr->getSystemCpu ? "yes" : "no",
+              jr->getProcessCpu ? "yes" : "no",
+              jr->getProcessCpuTime ? "yes" : "no");
+    return 1;
+}
+
+static void send_cpu_usage_msg(jmx_reader_t *jr, JNIEnv *env) {
+    uint8_t payload[JVMMON_MAX_PAYLOAD];
+    int off = 0;
+
+    if (!ensure_cpu_cached(jr, env)) return;
+
+    /* Only need local ref for the transient osBean object */
+    jobject osBean = (*env)->CallStaticObjectMethod(env, jr->mf_global, jr->getOS);
+    if (osBean == NULL) return;
+
+    jint procs = 1;
+    double sysCpu = 0, procCpu = 0;
+    int64_t userTimeMs = 0;
+
+    if (jr->getProcs) procs = (*env)->CallIntMethod(env, osBean, jr->getProcs);
+    if (jr->getSystemCpu) {
+        sysCpu = (*env)->CallDoubleMethod(env, osBean, jr->getSystemCpu) * 100.0;
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); sysCpu = 0; }
+    }
+    if (jr->getProcessCpu) {
+        procCpu = (*env)->CallDoubleMethod(env, osBean, jr->getProcessCpu) * 100.0;
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); procCpu = 0; }
+    }
+    if (jr->getProcessCpuTime) {
+        userTimeMs = (int64_t)((*env)->CallLongMethod(env, osBean, jr->getProcessCpuTime) / 1000000);
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); userTimeMs = 0; }
+    }
+
+    (*env)->DeleteLocalRef(env, osBean);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+    off += protocol_encode_u64(payload + off, jvmmon_time_millis());
+    off += protocol_encode_i64(payload + off, (int64_t)(sysCpu * 1000));
+    off += protocol_encode_i32(payload + off, (int32_t)procs);
+    off += protocol_encode_i64(payload + off, (int64_t)(procCpu * 1000));
+    off += protocol_encode_i64(payload + off, userTimeMs);
+    off += protocol_encode_i64(payload + off, 0); /* sysTime */
+    off += protocol_encode_u16(payload + off, 0); /* thread count */
+
+    agent_send_message(JVMMON_MSG_CPU_USAGE, payload, (uint32_t)off);
+}
+
 static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
     uint8_t payload[JVMMON_MAX_PAYLOAD];
     int off = 0;
@@ -96,8 +181,11 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
     off += protocol_encode_u8(payload + off, JMX_SUBTYPE_PLATFORM_INFO);
     off += protocol_encode_u64(payload + off, jvmmon_time_millis());
 
-    /* ── OperatingSystemMXBean ─────────────── */
-    jclass mf = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
+    if ((*env)->PushLocalFrame(env, 64) < 0) return;
+
+    /* Use cached ManagementFactory global ref if available (from CPU cache) */
+    jclass mf = jr->mf_global ? jr->mf_global :
+                (*env)->FindClass(env, "java/lang/management/ManagementFactory");
     if (mf != NULL) {
         /* OS info */
         jmethodID getOS = (*env)->GetStaticMethodID(env, mf,
@@ -111,30 +199,40 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
                 /* Available processors */
                 jmethodID getProcs = (*env)->GetMethodID(env, osClass,
                     "getAvailableProcessors", "()I");
-                if (getProcs != NULL) {
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                if (getProcs != NULL && off + 22 + 2 + 8 < JVMMON_MAX_PAYLOAD - 20) {
                     jint procs = (*env)->CallIntMethod(env, osBean, getProcs);
-                    off += protocol_encode_string(payload + off, "os.availableProcessors", 22);
-                    off += protocol_encode_i64(payload + off, (int64_t)procs);
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); }
+                    else {
+                        off += protocol_encode_string(payload + off, "os.availableProcessors", 22);
+                        off += protocol_encode_i64(payload + off, (int64_t)procs);
+                    }
                 }
 
                 /* System load average */
                 jmethodID getLoad = (*env)->GetMethodID(env, osClass,
                     "getSystemLoadAverage", "()D");
-                if (getLoad != NULL) {
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                if (getLoad != NULL && off + 20 + 2 + 8 < JVMMON_MAX_PAYLOAD - 20) {
                     jdouble load = (*env)->CallDoubleMethod(env, osBean, getLoad);
-                    off += protocol_encode_string(payload + off, "os.systemLoadAverage", 20);
-                    off += protocol_encode_i64(payload + off, (int64_t)(load * 1000));
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); }
+                    else {
+                        off += protocol_encode_string(payload + off, "os.systemLoadAverage", 20);
+                        off += protocol_encode_i64(payload + off, (int64_t)(load * 1000));
+                    }
                 }
 
                 /* Try com.sun.management for process CPU and system CPU */
                 jmethodID getProcessCpu = (*env)->GetMethodID(env, osClass,
                     "getProcessCpuLoad", "()D");
-                if (getProcessCpu != NULL) {
+                if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); getProcessCpu = NULL; }
+                if (getProcessCpu != NULL && off + 17 + 2 + 8 < JVMMON_MAX_PAYLOAD - 20) {
                     jdouble cpu = (*env)->CallDoubleMethod(env, osBean, getProcessCpu);
-                    off += protocol_encode_string(payload + off, "os.processCpuLoad", 17);
-                    off += protocol_encode_i64(payload + off, (int64_t)(cpu * 10000));
-                } else {
-                    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); }
+                    else {
+                        off += protocol_encode_string(payload + off, "os.processCpuLoad", 17);
+                        off += protocol_encode_i64(payload + off, (int64_t)(cpu * 10000));
+                    }
                 }
 
                 (*env)->DeleteLocalRef(env, osClass);
@@ -151,23 +249,30 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
                 jclass rtClass = (*env)->GetObjectClass(env, rtBean);
 
                 jmethodID getUptime = (*env)->GetMethodID(env, rtClass, "getUptime", "()J");
-                if (getUptime != NULL) {
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                if (getUptime != NULL && off + 16 + 2 + 8 < JVMMON_MAX_PAYLOAD - 20) {
                     jlong uptime = (*env)->CallLongMethod(env, rtBean, getUptime);
-                    off += protocol_encode_string(payload + off, "runtime.uptimeMs", 16);
-                    off += protocol_encode_i64(payload + off, (int64_t)uptime);
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); }
+                    else {
+                        off += protocol_encode_string(payload + off, "runtime.uptimeMs", 16);
+                        off += protocol_encode_i64(payload + off, (int64_t)uptime);
+                    }
                 }
 
                 jmethodID getVmName = (*env)->GetMethodID(env, rtClass, "getVmName",
                     "()Ljava/lang/String;");
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
                 if (getVmName != NULL) {
                     jstring vmName = (jstring)(*env)->CallObjectMethod(env, rtBean, getVmName);
                     if (vmName != NULL) {
                         const char *s = (*env)->GetStringUTFChars(env, vmName, NULL);
                         if (s != NULL) {
-                            off += protocol_encode_string(payload + off, "runtime.vmName", 14);
                             uint16_t slen = (uint16_t)strlen(s);
                             if (slen > 200) slen = 200;
-                            off += protocol_encode_string(payload + off, s, slen);
+                            if (off + 14 + 2 + slen + 2 + 2 < JVMMON_MAX_PAYLOAD - 20) {
+                                off += protocol_encode_string(payload + off, "runtime.vmName", 14);
+                                off += protocol_encode_string(payload + off, s, slen);
+                            }
                             (*env)->ReleaseStringUTFChars(env, vmName, s);
                         }
                         (*env)->DeleteLocalRef(env, vmName);
@@ -188,10 +293,14 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
                 jclass compClass = (*env)->GetObjectClass(env, compBean);
                 jmethodID getCompTime = (*env)->GetMethodID(env, compClass,
                     "getTotalCompilationTime", "()J");
-                if (getCompTime != NULL) {
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                if (getCompTime != NULL && off + 23 + 2 + 8 < JVMMON_MAX_PAYLOAD - 20) {
                     jlong compTime = (*env)->CallLongMethod(env, compBean, getCompTime);
-                    off += protocol_encode_string(payload + off, "compilation.totalTimeMs", 23);
-                    off += protocol_encode_i64(payload + off, (int64_t)compTime);
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); }
+                    else {
+                        off += protocol_encode_string(payload + off, "compilation.totalTimeMs", 23);
+                        off += protocol_encode_i64(payload + off, (int64_t)compTime);
+                    }
                 }
                 (*env)->DeleteLocalRef(env, compClass);
                 (*env)->DeleteLocalRef(env, compBean);
@@ -243,6 +352,12 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
                             char key[128];
                             snprintf(key, sizeof(key), "pool.%s.used", pname);
                             uint16_t klen = (uint16_t)strlen(key);
+                            /* Each key-value pair needs: 2(strlen) + klen + 8(i64) */
+                            if (off + (klen + 2 + 8) * 3 + 60 >= JVMMON_MAX_PAYLOAD - 20) {
+                                (*env)->ReleaseStringUTFChars(env, poolName, pname);
+                                (*env)->DeleteLocalRef(env, usageClass);
+                                goto pool_next;
+                            }
                             off += protocol_encode_string(payload + off, key, klen);
                             off += protocol_encode_i64(payload + off, (int64_t)used);
 
@@ -261,6 +376,7 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
                         }
                     }
 
+                pool_next:
                     if (poolName) (*env)->DeleteLocalRef(env, poolName);
                     if (usage) (*env)->DeleteLocalRef(env, usage);
                     (*env)->DeleteLocalRef(env, poolClass);
@@ -277,8 +393,11 @@ static void send_platform_info_impl(jmx_reader_t *jr, JNIEnv *env) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
     /* Terminate with empty key */
-    off += protocol_encode_u16(payload + off, 0);
+    if (off + 2 <= JVMMON_MAX_PAYLOAD) {
+        off += protocol_encode_u16(payload + off, 0);
+    }
 
+    (*env)->PopLocalFrame(env, NULL);
     agent_send_message(JVMMON_MSG_JMX_DATA, payload, (uint32_t)off);
     LOG_DEBUG("JMX: sent platform info (%d bytes)", off);
 }
@@ -402,7 +521,9 @@ static void send_subscribed_mbean(jmx_reader_t *jr, JNIEnv *env,
     }
 
     /* Terminate with empty key */
-    off += protocol_encode_u16(payload + off, 0);
+    if (off + 2 <= JVMMON_MAX_PAYLOAD) {
+        off += protocol_encode_u16(payload + off, 0);
+    }
 
     agent_send_message(JVMMON_MSG_JMX_DATA, payload, (uint32_t)off);
     LOG_DEBUG("JMX: sent %d attrs for %s", sentAttrs, mbean_name);
@@ -431,16 +552,35 @@ static void *jmx_poll_thread_fn(void *arg) {
     }
 
     while (jvmmon_atomic_load(&jr->running)) {
-        /* Send platform info periodically */
+        /* PushLocalFrame/PopLocalFrame to prevent JNI local reference overflow.
+         * Each iteration creates many local refs (FindClass, CallMethod, etc.)
+         * Without this, the local ref table overflows after ~500 iterations. */
+        if ((*env)->PushLocalFrame(env, 128) != 0) {
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            jvmmon_sleep_ms(jr->interval_ms);
+            continue;
+        }
+
+        /* Send CPU usage (MSG_CPU_USAGE) — this is the most important for Dashboard */
+        send_cpu_usage_msg(jr, env);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+        /* Send platform info periodically (JMX_DATA) */
         send_platform_info_impl(jr, env);
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
         /* Send subscribed MBean data */
         jvmmon_mutex_lock(&jr->lock);
         int i;
         for (i = 0; i < jr->subscribed_count; i++) {
             send_subscribed_mbean(jr, env, jr->subscribed[i]);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         }
         jvmmon_mutex_unlock(&jr->lock);
+
+        /* Clear any lingering exceptions and release all local references */
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        (*env)->PopLocalFrame(env, NULL);
 
         jvmmon_sleep_ms(jr->interval_ms);
     }
@@ -505,6 +645,7 @@ void jmx_reader_subscribe(jmx_reader_t *jr, const char *mbean_name) {
             }
         }
         strncpy(jr->subscribed[jr->subscribed_count], mbean_name, 255);
+        jr->subscribed[jr->subscribed_count][255] = '\0';
         jr->subscribed_count++;
         LOG_INFO("JMX: subscribed to '%s'", mbean_name);
     }

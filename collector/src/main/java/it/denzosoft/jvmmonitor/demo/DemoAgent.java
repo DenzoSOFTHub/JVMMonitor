@@ -53,14 +53,22 @@ public class DemoAgent {
     };
 
     /* Exception simulation */
+    /* {exceptionClass, throwClass, throwMethod, message, causeClass, causeMessage} */
     private static final String[][] EXCEPTION_SCENARIOS = {
-        {"Ljava/lang/NullPointerException;", "com.myapp.service.UserService", "findById"},
-        {"Ljava/net/SocketTimeoutException;", "com.myapp.client.HttpClient", "execute"},
-        {"Ljava/sql/SQLException;", "com.myapp.dao.OrderDao", "findOrders"},
-        {"Ljava/lang/IllegalArgumentException;", "com.myapp.api.RestController", "validate"},
-        {"Ljava/util/NoSuchElementException;", "com.myapp.cache.LruCache", "get"},
-        {"Ljava/io/IOException;", "com.myapp.io.FileProcessor", "readChunk"},
-        {"Ljava/lang/NumberFormatException;", "com.myapp.parser.ConfigParser", "parseInt"},
+        {"Ljava/lang/NullPointerException;", "com.myapp.service.UserService", "findById",
+         "Cannot invoke method on null reference", "", ""},
+        {"Ljava/net/SocketTimeoutException;", "com.myapp.client.HttpClient", "execute",
+         "Read timed out after 30000ms", "Ljava/net/ConnectException;", "Connection refused: 10.0.1.50:8080"},
+        {"Ljava/sql/SQLException;", "com.myapp.dao.OrderDao", "findOrders",
+         "ERROR: relation \"orders\" does not exist", "Lorg/postgresql/util/PSQLException;", "ERROR: relation \"orders\" does not exist"},
+        {"Ljava/lang/IllegalArgumentException;", "com.myapp.api.RestController", "validate",
+         "Invalid order ID: -1", "", ""},
+        {"Ljava/util/NoSuchElementException;", "com.myapp.cache.LruCache", "get",
+         "Key not found: user:99999", "", ""},
+        {"Ljava/io/IOException;", "com.myapp.io.FileProcessor", "readChunk",
+         "Failed to read /var/data/input.csv", "Ljava/io/FileNotFoundException;", "/var/data/input.csv (No such file or directory)"},
+        {"Ljava/lang/NumberFormatException;", "com.myapp.parser.ConfigParser", "parseInt",
+         "For input string: \"abc\"", "", ""},
     };
 
     /* JIT compilation simulation */
@@ -97,36 +105,51 @@ public class DemoAgent {
 
     public void run() throws IOException {
         ServerSocket server = new ServerSocket(port);
-        System.out.println("=== JVMMonitor Demo Agent ===");
-        System.out.println("Listening on port " + port);
-        System.out.println("Connect with: java -jar jvmmonitor.jar connect 127.0.0.1 " + port);
-        System.out.println("Press Ctrl+C to stop.\n");
+        try {
+            System.out.println("=== JVMMonitor Demo Agent ===");
+            System.out.println("Listening on port " + port);
+            System.out.println("Connect with: java -jar jvmmonitor.jar connect 127.0.0.1 " + port);
+            System.out.println("Press Ctrl+C to stop.\n");
 
-        while (running) {
-            System.out.println("Waiting for collector connection...");
-            Socket client = server.accept();
-            System.out.println("Collector connected from " + client.getRemoteSocketAddress());
+            while (running) {
+                System.out.println("Waiting for collector connection...");
+                Socket client = server.accept();
+                System.out.println("Collector connected from " + client.getRemoteSocketAddress());
 
-            try {
-                handleClient(client);
-            } catch (IOException e) {
-                System.out.println("Collector disconnected: " + e.getMessage());
-            } finally {
-                try { client.close(); } catch (IOException e) { /* ignore */ }
+                try {
+                    handleClient(client);
+                } catch (IOException e) {
+                    System.out.println("Collector disconnected: " + e.getMessage());
+                } finally {
+                    try { client.close(); } catch (IOException e) { /* ignore */ }
+                }
+                System.out.println("Session ended. Waiting for new connection...\n");
             }
-            System.out.println("Session ended. Waiting for new connection...\n");
+        } finally {
+            try { server.close(); } catch (IOException e) { /* ignore */ }
         }
-
-        server.close();
     }
 
-    private void handleClient(Socket client) throws IOException {
-        OutputStream out = client.getOutputStream();
-        DataOutputStream dos = new DataOutputStream(out);
+    private void handleClient(final Socket client) throws IOException {
+        final OutputStream out = client.getOutputStream();
+        final DataOutputStream dos = new DataOutputStream(out);
 
         /* 1. Send handshake */
         sendHandshake(dos);
         System.out.println("  -> Handshake sent");
+
+        /* Start recv thread to handle commands (JMX browse, module enable, etc.) */
+        Thread recvThread = new Thread(new Runnable() {
+            public void run() {
+                try {
+                    recvLoop(client, dos);
+                } catch (Exception e) {
+                    /* Client disconnected or socket closed — normal */
+                }
+            }
+        }, "demo-recv");
+        recvThread.setDaemon(true);
+        recvThread.start();
 
         /* 2. Send method name resolution for CPU profiler */
         sendMethodInfo(dos);
@@ -264,6 +287,116 @@ public class DemoAgent {
                 break;
             }
         }
+    }
+
+    /* ── Command receiver ────────────────────────────── */
+
+    private void recvLoop(Socket client, DataOutputStream dos) throws IOException {
+        java.io.DataInputStream dis = new java.io.DataInputStream(client.getInputStream());
+        byte[] header = new byte[10];
+        while (running && !client.isClosed()) {
+            /* Read 10-byte header: magic(4) + version(1) + type(1) + length(4) */
+            dis.readFully(header);
+            int magic = ((header[0] & 0xFF) << 24) | ((header[1] & 0xFF) << 16)
+                      | ((header[2] & 0xFF) << 8) | (header[3] & 0xFF);
+            if (magic != 0x4A564D4D) continue; /* bad magic, skip */
+            int msgType = header[5] & 0xFF;
+            int payloadLen = ((header[6] & 0xFF) << 24) | ((header[7] & 0xFF) << 16)
+                           | ((header[8] & 0xFF) << 8) | (header[9] & 0xFF);
+            if (payloadLen > 8192 || payloadLen < 0) continue;
+            byte[] payload = new byte[payloadLen];
+            if (payloadLen > 0) dis.readFully(payload);
+
+            if (msgType == 0x03 && payloadLen > 0) { /* MSG_COMMAND */
+                int subType = payload[0] & 0xFF;
+                handleDemoCommand(subType, payload, dos);
+            }
+        }
+    }
+
+    private void handleDemoCommand(int subType, byte[] payload, DataOutputStream dos) {
+        try {
+            if (subType == 0x33) { /* DIAG_CMD_JMX_LIST_MBEANS */
+                sendJmxMBeanList(dos);
+            } else if (subType == 0x34) { /* DIAG_CMD_JMX_GET_ATTRS */
+                int nameLen = ((payload[1] & 0xFF) << 8) | (payload[2] & 0xFF);
+                String mbeanName = new String(payload, 3, nameLen, "UTF-8");
+                sendJmxMBeanAttrs(dos, mbeanName);
+            }
+            /* Other commands (enable/disable modules etc.) — silently ignore in demo */
+        } catch (Exception e) {
+            System.err.println("[DemoAgent] Command error: " + e.getMessage());
+        }
+    }
+
+    private synchronized void sendJmxMBeanList(DataOutputStream dos) throws IOException {
+        /* Use the real MBeanServer from this JVM */
+        javax.management.MBeanServer server = java.lang.management.ManagementFactory.getPlatformMBeanServer();
+        java.util.Set names = server.queryNames(null, null);
+
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        DataOutputStream p = new DataOutputStream(baos);
+        p.writeByte(0x01); /* JMX_MBEAN_LIST */
+        p.writeLong(System.currentTimeMillis());
+
+        int count = Math.min(names.size(), 500);
+        p.writeShort(count);
+        int sent = 0;
+        java.util.Iterator it = names.iterator();
+        while (it.hasNext() && sent < count) {
+            String name = it.next().toString();
+            writeStr(p, name);
+            sent++;
+        }
+        p.flush();
+        sendMessage(dos, 0xB0, baos.toByteArray()); /* MSG_JMX_DATA */
+        System.out.println("  -> JMX: sent " + sent + " MBean names");
+    }
+
+    private synchronized void sendJmxMBeanAttrs(DataOutputStream dos, String mbeanName) throws Exception {
+        javax.management.MBeanServer server = java.lang.management.ManagementFactory.getPlatformMBeanServer();
+        javax.management.ObjectName objName = new javax.management.ObjectName(mbeanName);
+        javax.management.MBeanInfo info = server.getMBeanInfo(objName);
+        javax.management.MBeanAttributeInfo[] attrInfos = info.getAttributes();
+
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        DataOutputStream p = new DataOutputStream(baos);
+        p.writeByte(0x02); /* JMX_MBEAN_ATTRS */
+        p.writeLong(System.currentTimeMillis());
+        writeStr(p, mbeanName);
+
+        for (int i = 0; i < attrInfos.length; i++) {
+            if (!attrInfos[i].isReadable()) continue;
+            try {
+                Object val = server.getAttribute(objName, attrInfos[i].getName());
+                String key = attrInfos[i].getName();
+                String sval;
+                if (val instanceof javax.management.openmbean.CompositeData) {
+                    /* Decompose composite */
+                    javax.management.openmbean.CompositeData cd = (javax.management.openmbean.CompositeData) val;
+                    java.util.Iterator keys = cd.getCompositeType().keySet().iterator();
+                    while (keys.hasNext()) {
+                        String k = keys.next().toString();
+                        Object sub = cd.get(k);
+                        writeStr(p, key + "." + k);
+                        writeStr(p, sub != null ? sub.toString() : "null");
+                    }
+                    continue;
+                } else {
+                    sval = val != null ? val.toString() : "null";
+                }
+                if (sval.length() > 500) sval = sval.substring(0, 500);
+                writeStr(p, key);
+                writeStr(p, sval);
+            } catch (Exception e) { /* skip unreadable */ }
+            if (baos.size() > 7500) break; /* stay under MAX_PAYLOAD */
+        }
+        /* Terminator */
+        writeStr(p, "");
+        writeStr(p, "");
+        p.flush();
+        sendMessage(dos, 0xB0, baos.toByteArray());
+        System.out.println("  -> JMX: sent attrs for " + mbeanName);
     }
 
     /* ── Message senders ─────────────────────────────── */
@@ -507,6 +640,17 @@ public class DemoAgent {
         p.writeLong(parentTraceId);
         p.writeInt(depth);
         p.writeByte(isException ? 1 : 0);
+        writeStr(p, ""); /* paramsJson */
+        writeStr(p, ""); /* returnValueJson */
+        /* v1.1.1 resource counters: allocBytes, blockedMs, waitedMs, cpuNs */
+        long allocBytes = (long)(durationNanos / 1000.0 * (50 + RNG.nextInt(200)));
+        long blockedMs = isException ? (2 + RNG.nextInt(10)) : (RNG.nextDouble() < 0.2 ? (1 + RNG.nextInt(5)) : 0);
+        long waitedMs = eventType == 3 ? (1 + RNG.nextInt(3)) : (RNG.nextDouble() < 0.15 ? (1 + RNG.nextInt(8)) : 0);
+        long cpuNs = (long)(durationNanos * (0.4 + RNG.nextDouble() * 0.5)); /* 40-90% of wall time = CPU */
+        p.writeLong(allocBytes);
+        p.writeLong(blockedMs);
+        p.writeLong(waitedMs);
+        p.writeLong(cpuNs);
         p.flush();
         sendMessage(dos, ProtocolConstants.MSG_INSTR_EVENT, baos.toByteArray());
     }
@@ -650,6 +794,9 @@ public class DemoAgent {
         p.writeInt(caughtCount);
         p.writeInt(0); /* dropped */
         writeStr(p, scenario[0]); /* exception class */
+        writeStr(p, scenario[3]); /* message */
+        writeStr(p, scenario[4]); /* cause class */
+        writeStr(p, scenario[5]); /* cause message */
         writeStr(p, scenario[1]); /* throw class */
         writeStr(p, scenario[2]); /* throw method */
         p.writeLong(RNG.nextInt(500)); /* location */

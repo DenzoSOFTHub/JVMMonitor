@@ -13,7 +13,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define MAX_HISTO_CLASSES 4096
+#define MAX_HISTO_CLASSES 8192  /* covers JVMs with up to 8K loaded classes */
 
 /* Global state for heap callback (JVMTI callbacks can't carry user data in older APIs) */
 static volatile int32_t g_histo_counts[MAX_HISTO_CLASSES];

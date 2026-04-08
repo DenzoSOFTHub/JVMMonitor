@@ -55,6 +55,21 @@ jvm-monitor> enable locks 1
 
 These modules add minimal overhead (< 5% total) and provide essential visibility.
 
+**GUI shortcut:** In the GUI, panels that require on-demand modules (Exceptions, Locks, Network) display a yellow activation bar with an "Enable" button. Click it to activate the module directly from the panel. When data arrives, the bar turns green with a "Disable" button.
+
+### 4. Detaching the agent
+
+When monitoring is complete and you want zero overhead, use the `detach` command:
+
+```
+jvm-monitor> detach
+Agent shut down. All modules stopped, transport closed.
+```
+
+This shuts down the agent entirely: stops all modules, closes the transport socket, and leaves zero CPU overhead. The agent becomes dormant in the JVM. To restart monitoring later, use `attach` again.
+
+This is different from `disconnect`, which only closes the collector's connection while the agent continues running.
+
 ---
 
 ## What to Monitor

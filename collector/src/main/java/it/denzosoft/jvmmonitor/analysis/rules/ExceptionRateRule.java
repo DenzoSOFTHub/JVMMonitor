@@ -31,8 +31,10 @@ public class ExceptionRateRule implements DiagnosticRule {
         double recentRate = recent.size();  /* per minute */
         int baselineCount = allRecent.size() - recent.size();
         double baselineRate = baselineCount > 0 ? baselineCount / 4.0 : 0;
+        double safeBaselineRate = baselineRate > 0.001 ? baselineRate : 0.001;
         if (recentRate > t.exceptionMinRate && baselineRate > 0
                 && recentRate > baselineRate * t.exceptionSpikeMultiplier) {
+            double ratio = recentRate / safeBaselineRate;
             results.add(Diagnosis.builder()
                 .timestamp(now)
                 .category("Exception Storm")
@@ -40,10 +42,10 @@ public class ExceptionRateRule implements DiagnosticRule {
                 .summary(String.format(
                     "Exception rate spike: %.0f/min (was %.0f/min baseline) — %.1fx increase. " +
                     "Possible failure cascade or new bug introduced.",
-                    recentRate, baselineRate, recentRate / baselineRate))
+                    recentRate, baselineRate, ratio))
                 .evidence(String.format(
                     "Last minute: %.0f exceptions, Baseline: %.0f/min, Ratio: %.1fx",
-                    recentRate, baselineRate, recentRate / baselineRate))
+                    recentRate, baselineRate, ratio))
                 .suggestedAction("Check Exceptions tab for the new exception types causing the spike.")
                 .build());
         }

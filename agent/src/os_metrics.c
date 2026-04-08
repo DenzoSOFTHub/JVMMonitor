@@ -34,7 +34,9 @@ static long read_proc_status_kb(const char *field) {
     long value = -1;
     while (fgets(line, sizeof(line), f) != NULL) {
         if (strncmp(line, field, strlen(field)) == 0) {
-            sscanf(line + strlen(field), "%ld", &value);
+            if (sscanf(line + strlen(field), "%ld", &value) != 1) {
+                value = -1;
+            }
             break;
         }
     }
@@ -68,7 +70,7 @@ static int count_tcp_states(int *established, int *close_wait, int *time_wait) {
             field++;
         }
         while (*p == ' ') p++;
-        sscanf(p, "%X", &state);
+        if (sscanf(p, "%X", &state) != 1) continue;
         if (state == 0x01) (*established)++;
         else if (state == 0x06) (*time_wait)++;
         else if (state == 0x08) (*close_wait)++;
@@ -115,8 +117,8 @@ static void collect_and_send(os_metrics_t *om) {
     long rss_kb = read_rss_kb();
     long vm_size_kb = -1;
 #endif
-    off += protocol_encode_i64(payload + off, (int64_t)(rss_kb * 1024));   /* bytes */
-    off += protocol_encode_i64(payload + off, (int64_t)(vm_size_kb * 1024));
+    off += protocol_encode_i64(payload + off, rss_kb >= 0 ? (int64_t)(rss_kb * 1024) : -1);
+    off += protocol_encode_i64(payload + off, vm_size_kb >= 0 ? (int64_t)(vm_size_kb * 1024) : -1);
 
     /* Context switches */
     long vol_cs, invol_cs;

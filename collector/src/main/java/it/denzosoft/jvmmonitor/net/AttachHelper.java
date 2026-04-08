@@ -18,6 +18,9 @@ public final class AttachHelper {
     private static Class<?> vmdClass;
     private static boolean initialized;
     private static String initError;
+    /** URLClassLoader for tools.jar. Intentionally kept open for the lifetime
+     *  of the process because the Attach API classes it loaded must remain accessible. */
+    private static URLClassLoader toolsLoader;
 
     private AttachHelper() {}
 
@@ -52,10 +55,10 @@ public final class AttachHelper {
 
         try {
             URL toolsUrl = toolsJar.toURI().toURL();
-            URLClassLoader loader = new URLClassLoader(
+            toolsLoader = new URLClassLoader(
                     new URL[]{ toolsUrl }, AttachHelper.class.getClassLoader());
-            vmClass = loader.loadClass("com.sun.tools.attach.VirtualMachine");
-            vmdClass = loader.loadClass("com.sun.tools.attach.VirtualMachineDescriptor");
+            vmClass = toolsLoader.loadClass("com.sun.tools.attach.VirtualMachine");
+            vmdClass = toolsLoader.loadClass("com.sun.tools.attach.VirtualMachineDescriptor");
         } catch (Exception e) {
             initError = "Found tools.jar at " + toolsJar.getAbsolutePath() +
                     " but failed to load Attach API: " + e.getMessage();
@@ -143,19 +146,74 @@ public final class AttachHelper {
             throw new RuntimeException(initError);
         }
 
-        /* VirtualMachine vm = VirtualMachine.attach(pid) */
-        Method attachMethod = vmClass.getMethod("attach", String.class);
-        Object vm = attachMethod.invoke(null, pid);
+        Object vm;
+        try {
+            Method attachMethod = vmClass.getMethod("attach", String.class);
+            vm = attachMethod.invoke(null, pid);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw unwrap(e, "Failed to attach to PID " + pid);
+        }
 
         try {
-            /* vm.loadAgentPath(agentPath, agentOptions) */
             Method loadAgent = vmClass.getMethod("loadAgentPath", String.class, String.class);
             loadAgent.invoke(vm, agentPath, agentOptions);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw unwrap(e, "Failed to load native agent");
         } finally {
-            /* vm.detach() */
-            Method detach = vmClass.getMethod("detach");
-            detach.invoke(vm);
+            try {
+                Method detach = vmClass.getMethod("detach");
+                detach.invoke(vm);
+            } catch (Exception e) { /* ignore detach errors */ }
         }
+    }
+
+    /**
+     * Attach a Java agent (.jar) to a running JVM.
+     * Uses vm.loadAgent() instead of vm.loadAgentPath().
+     * @param pid           Target JVM process ID
+     * @param agentJarPath  Path to jvmmonitor-agent.jar
+     * @param agentOptions  Options string (e.g., "port=9090")
+     */
+    public static void attachJavaAgent(String pid, String agentJarPath, String agentOptions) throws Exception {
+        init();
+        if (vmClass == null) {
+            throw new RuntimeException(initError);
+        }
+
+        Object vm;
+        try {
+            Method attachMethod = vmClass.getMethod("attach", String.class);
+            vm = attachMethod.invoke(null, pid);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw unwrap(e, "Failed to attach to PID " + pid);
+        }
+
+        try {
+            Method loadAgent = vmClass.getMethod("loadAgent", String.class, String.class);
+            loadAgent.invoke(vm, agentJarPath, agentOptions);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw unwrap(e, "Failed to load Java agent");
+        } finally {
+            try {
+                Method detach = vmClass.getMethod("detach");
+                detach.invoke(vm);
+            } catch (Exception e) { /* ignore detach errors */ }
+        }
+    }
+
+    /** Same fix for native agent attach. */
+
+    /**
+     * Unwrap InvocationTargetException to get the real cause with a clear message.
+     */
+    private static Exception unwrap(java.lang.reflect.InvocationTargetException e, String context) {
+        Throwable cause = e.getCause();
+        if (cause == null) cause = e;
+        String msg = cause.getMessage();
+        if (msg == null || msg.isEmpty()) {
+            msg = cause.getClass().getName();
+        }
+        return new Exception(context + ": " + msg, cause);
     }
 
     /**

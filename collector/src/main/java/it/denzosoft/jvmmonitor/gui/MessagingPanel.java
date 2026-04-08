@@ -82,7 +82,7 @@ public class MessagingPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
 
@@ -181,6 +181,15 @@ public class MessagingPanel extends JPanel {
         alertArea.setText(alerts.length() > 0 ? alerts.toString() : "No queue issues detected.");
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     /* ── Table Model ─────────────────────────────── */
 
     private static class QueueTableModel extends AbstractTableModel {
@@ -200,6 +209,7 @@ public class MessagingPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.length) return "";
             QueueInfo q = data[row];
             if (q == null) return "";
             switch (col) {

@@ -29,8 +29,8 @@ int exception_tracker_activate(int level, const char *target, void *ctx) {
     et->caught_count = 0;
     et->sent_count = 0;
     et->dropped_count = 0;
-    et->window_start_ms = jvmmon_time_millis();
-    et->window_sent = 0;
+    jvmmon_atomic_store(&et->window_start_sec, (int32_t)(jvmmon_time_millis() / 1000));
+    jvmmon_atomic_store(&et->window_sent, 0);
 
     (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_ENABLE,
             JVMTI_EVENT_EXCEPTION, NULL);
@@ -63,14 +63,14 @@ int exception_tracker_deactivate(int level, void *ctx) {
 }
 
 /* Check rate limit. Returns 1 if allowed, 0 if throttled.
- * Thread-safe: uses atomic CAS for window reset and atomic increment for counter. */
+ * Thread-safe: uses atomic CAS for window reset and atomic increment for counter.
+ * window_start_sec is a 32-bit truncated seconds value (safe for 68+ years). */
 static int rate_check(exception_tracker_t *et) {
-    uint64_t now = jvmmon_time_millis();
+    int32_t now_sec = (int32_t)(jvmmon_time_millis() / 1000);
     /* Reset window every second — use CAS to prevent double-reset */
-    uint64_t ws = et->window_start_ms;
-    if (now - ws >= 1000) {
-        if (jvmmon_atomic_cas((volatile int32_t *)&et->window_start_ms,
-                (int32_t)ws, (int32_t)now)) {
+    int32_t ws = jvmmon_atomic_load(&et->window_start_sec);
+    if (now_sec != ws) {
+        if (jvmmon_atomic_cas(&et->window_start_sec, ws, now_sec)) {
             jvmmon_atomic_store(&et->window_sent, 0);
         }
     }
@@ -117,6 +117,93 @@ void exception_tracker_on_exception(exception_tracker_t *et, JNIEnv *jni,
     uint16_t cslen = class_sig ? (uint16_t)strlen(class_sig) : 0;
     if (cslen > 255) cslen = 255;
     off += protocol_encode_string(payload + off, class_sig, cslen);
+
+    /* Exception message: exception.getMessage() — use cached method IDs */
+    {
+        char msg_buf[512] = {0};
+        /* Resolve cache once on first exception */
+        if (!et->jni_cached) {
+            jclass tc = (*jni)->FindClass(jni, "java/lang/Throwable");
+            if (tc) {
+                et->throwable_global = (jclass)(*jni)->NewGlobalRef(jni, tc);
+                et->getMessage = (*jni)->GetMethodID(jni, tc, "getMessage", "()Ljava/lang/String;");
+                et->getCause = (*jni)->GetMethodID(jni, tc, "getCause", "()Ljava/lang/Throwable;");
+                (*jni)->DeleteLocalRef(jni, tc);
+                et->jni_cached = 1;
+            }
+            if ((*jni)->ExceptionCheck(jni)) (*jni)->ExceptionClear(jni);
+        }
+        if (et->throwable_global) {
+            jmethodID getMessage = et->getMessage;
+            if (getMessage) {
+                jstring jmsg = (jstring)(*jni)->CallObjectMethod(jni, exception, getMessage);
+                if (jmsg && !(*jni)->ExceptionCheck(jni)) {
+                    const char *utf = (*jni)->GetStringUTFChars(jni, jmsg, NULL);
+                    if (utf) {
+                        size_t mlen = strlen(utf);
+                        if (mlen > sizeof(msg_buf) - 1) mlen = sizeof(msg_buf) - 1;
+                        memcpy(msg_buf, utf, mlen);
+                        (*jni)->ReleaseStringUTFChars(jni, jmsg, utf);
+                    }
+                    (*jni)->DeleteLocalRef(jni, jmsg);
+                } else if ((*jni)->ExceptionCheck(jni)) {
+                    (*jni)->ExceptionClear(jni);
+                }
+            }
+
+            /* Cause: exception.getCause() — cached method ID */
+            char cause_class_buf[256] = {0};
+            char cause_msg_buf[512] = {0};
+            jmethodID getCause = et->getCause;
+            if (getCause) {
+                jobject cause = (*jni)->CallObjectMethod(jni, exception, getCause);
+                if (cause && !(*jni)->ExceptionCheck(jni)) {
+                    /* Cause class name */
+                    jclass cause_cls = (*jni)->GetObjectClass(jni, cause);
+                    if (cause_cls) {
+                        char *cause_sig = NULL;
+                        (*jvmti)->GetClassSignature(jvmti, cause_cls, &cause_sig, NULL);
+                        if (cause_sig) {
+                            size_t clen = strlen(cause_sig);
+                            if (clen > sizeof(cause_class_buf) - 1) clen = sizeof(cause_class_buf) - 1;
+                            memcpy(cause_class_buf, cause_sig, clen);
+                            (*jvmti)->Deallocate(jvmti, (unsigned char *)cause_sig);
+                        }
+                        (*jni)->DeleteLocalRef(jni, cause_cls);
+                    }
+                    /* Cause message */
+                    if (getMessage) {
+                        jstring cmsg = (jstring)(*jni)->CallObjectMethod(jni, cause, getMessage);
+                        if (cmsg && !(*jni)->ExceptionCheck(jni)) {
+                            const char *cutf = (*jni)->GetStringUTFChars(jni, cmsg, NULL);
+                            if (cutf) {
+                                size_t cmlen = strlen(cutf);
+                                if (cmlen > sizeof(cause_msg_buf) - 1) cmlen = sizeof(cause_msg_buf) - 1;
+                                memcpy(cause_msg_buf, cutf, cmlen);
+                                (*jni)->ReleaseStringUTFChars(jni, cmsg, cutf);
+                            }
+                            (*jni)->DeleteLocalRef(jni, cmsg);
+                        } else if ((*jni)->ExceptionCheck(jni)) {
+                            (*jni)->ExceptionClear(jni);
+                        }
+                    }
+                    (*jni)->DeleteLocalRef(jni, cause);
+                } else if ((*jni)->ExceptionCheck(jni)) {
+                    (*jni)->ExceptionClear(jni);
+                }
+            }
+            /* Encode message, cause class, cause message */
+            off += protocol_encode_string(payload + off, msg_buf, (uint16_t)strlen(msg_buf));
+            off += protocol_encode_string(payload + off, cause_class_buf, (uint16_t)strlen(cause_class_buf));
+            off += protocol_encode_string(payload + off, cause_msg_buf, (uint16_t)strlen(cause_msg_buf));
+        } else {
+            /* Throwable class not found (should never happen) */
+            if ((*jni)->ExceptionCheck(jni)) (*jni)->ExceptionClear(jni);
+            off += protocol_encode_string(payload + off, "", 0);
+            off += protocol_encode_string(payload + off, "", 0);
+            off += protocol_encode_string(payload + off, "", 0);
+        }
+    }
 
     /* Method where thrown */
     char mname[256] = {0}, cname[256] = {0};

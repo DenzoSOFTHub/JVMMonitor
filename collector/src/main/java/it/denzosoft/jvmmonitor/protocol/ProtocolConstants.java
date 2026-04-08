@@ -58,7 +58,8 @@ public final class ProtocolConstants {
     public static final int DEBUG_CMD_STEP_OVER  = 0x23;
     public static final int DEBUG_CMD_STEP_INTO  = 0x24;
     public static final int DEBUG_CMD_STEP_OUT   = 0x25;
-    public static final int DEBUG_CMD_GET_CLASS  = 0x26;
+    public static final int DEBUG_CMD_GET_CLASS   = 0x26;
+    public static final int DEBUG_CMD_LIST_CLASSES = 0x27;
 
     /* Diagnostic messages */
     public static final int MSG_FIELD_WATCH      = 0xD2;

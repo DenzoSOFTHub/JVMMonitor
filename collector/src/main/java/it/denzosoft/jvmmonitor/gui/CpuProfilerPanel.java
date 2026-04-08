@@ -162,7 +162,7 @@ public class CpuProfilerPanel extends JPanel {
         flameGraph.clear();
     }
 
-    public void refresh() {
+    public void updateData() {
         if (recording) {
             /* Live update: aggregate and refresh views every refresh cycle */
             long now = System.currentTimeMillis();
@@ -180,6 +180,15 @@ public class CpuProfilerPanel extends JPanel {
         }
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     /** Try to resolve method names from the connection's METHOD_INFO cache. */
     private void resolveNames(List<CpuSample> samples) {
         it.denzosoft.jvmmonitor.net.AgentConnection conn = collector.getConnection();
@@ -190,6 +199,7 @@ public class CpuProfilerPanel extends JPanel {
             CpuSample.StackFrame[] frames = samples.get(s).getFrames();
             if (frames == null) continue;
             for (int f = 0; f < frames.length; f++) {
+                if (frames[f] == null) continue;
                 if (frames[f].getClassName() == null) {
                     String[] names = cache.get(Long.valueOf(frames[f].getMethodId()));
                     if (names != null) {
@@ -269,6 +279,7 @@ public class CpuProfilerPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.size()) return "";
             MethodNode m = data.get(row);
             switch (col) {
                 case 0: return Integer.valueOf(row + 1);

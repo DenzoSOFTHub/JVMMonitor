@@ -41,6 +41,13 @@ public class GcPanel extends JPanel {
         JTable table = new JTable(tableModel);
         table.setDefaultRenderer(Object.class, new GcCellRenderer());
         table.setAutoCreateRowSorter(true);
+        table.setRowHeight(18);
+        /* Time=90, Type=60, Duration=80, GC#=55, FullGC#=60 */
+        table.getColumnModel().getColumn(0).setPreferredWidth(90); table.getColumnModel().getColumn(0).setMaxWidth(110);
+        table.getColumnModel().getColumn(1).setPreferredWidth(60); table.getColumnModel().getColumn(1).setMaxWidth(80);
+        table.getColumnModel().getColumn(2).setPreferredWidth(80); table.getColumnModel().getColumn(2).setMaxWidth(100);
+        table.getColumnModel().getColumn(3).setPreferredWidth(55); table.getColumnModel().getColumn(3).setMaxWidth(70);
+        table.getColumnModel().getColumn(4).setPreferredWidth(60); table.getColumnModel().getColumn(4).setMaxWidth(75);
         split.setBottomComponent(new JScrollPane(table));
 
         add(split, BorderLayout.CENTER);
@@ -77,7 +84,9 @@ public class GcPanel extends JPanel {
         public String getColumnName(int col) { return COLUMNS[col]; }
 
         public Object getValueAt(int row, int col) {
-            GcEvent e = data.get(data.size() - 1 - row); /* newest first */
+            int idx = data.size() - 1 - row;
+            if (idx < 0 || idx >= data.size()) return "";
+            GcEvent e = data.get(idx); /* newest first */
             switch (col) {
                 case 0: return sdf.format(new Date(e.getTimestamp()));
                 case 1: return e.getTypeName();

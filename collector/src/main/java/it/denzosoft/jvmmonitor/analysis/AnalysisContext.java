@@ -154,6 +154,12 @@ public class AnalysisContext {
         return store.getLatestOsMetrics();
     }
 
+    /* ── JVM Config ─────────────────────────────────── */
+
+    public JvmConfig getJvmConfig() {
+        return store.getLatestJvmConfig();
+    }
+
     /* ── Native Memory ──────────────────────────────── */
 
     public NativeMemoryStats getLatestNativeMemory() {

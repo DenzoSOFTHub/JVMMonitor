@@ -83,7 +83,10 @@ public class HeapGrowthRule implements DiagnosticRule {
         /* ── 3. Allocation pressure: allocating faster than GC can reclaim ── */
         double allocRate = ctx.getAllocationRateMBPerSec(60);
         double reclaimRate = ctx.getGcReclaimRateMBPerSec(60);
+        double safeReclaimRate = reclaimRate > 0.001 ? reclaimRate : 0.001;
         if (allocRate > 0 && reclaimRate > 0 && allocRate > reclaimRate * t.allocPressureRatio) {
+            double ratio = allocRate / safeReclaimRate;
+            if (ratio > 999.9) ratio = 999.9;
             results.add(Diagnosis.builder()
                 .timestamp(System.currentTimeMillis())
                 .category("Allocation Pressure")
@@ -91,10 +94,10 @@ public class HeapGrowthRule implements DiagnosticRule {
                 .summary(String.format(
                     "Allocation rate (%.0f MB/s) exceeds GC reclaim rate (%.0f MB/s) by %.0f%%. " +
                     "Heap will fill up faster than GC can free it.",
-                    allocRate, reclaimRate, (allocRate / reclaimRate - 1) * 100))
+                    allocRate, reclaimRate, (ratio - 1) * 100))
                 .evidence(String.format(
                     "Alloc: %.0f MB/s, Reclaim: %.0f MB/s, Ratio: %.1fx",
-                    allocRate, reclaimRate, allocRate / reclaimRate))
+                    allocRate, reclaimRate, ratio))
                 .suggestedAction("Reduce allocation rate: check allocation recording for top allocators. " +
                     "Consider object pooling or reducing temporary object creation.")
                 .build());

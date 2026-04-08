@@ -54,7 +54,7 @@ If GC is the problem, see Section 3 (Memory Pressure / GC Thrashing).
 
 If CPU is low but the application is still slow, threads may be blocked waiting for locks.
 
-**GUI:** Open the **Threads** tab. Check the stacked area chart — if the red area (BLOCKED) is significant, there is lock contention. Then open the **Locks** tab to see which locks are contended.
+**GUI:** Open the **Threads** tab. Check the stacked area chart — if the red area (BLOCKED) is significant, there is lock contention. Then open the **Locks** tab to see which locks are contended. If the locks module is not enabled, a yellow bar appears at the top with an "Enable" button -- click it to activate the module directly from the panel.
 
 **CLI:**
 ```
@@ -287,7 +287,7 @@ Deadlocks are caused by threads acquiring locks in different orders. The deadloc
 
 ### Step 1: Check network connections
 
-**GUI:** Open the **Network** tab. Look for growing CLOSE_WAIT count in the summary bar. The Connection Warnings section at the bottom flags suspicious connections.
+**GUI:** Open the **Network** tab. If the network module is not enabled, a yellow bar appears at the top with an "Enable" button -- click it to activate the module. Look for growing CLOSE_WAIT count in the summary bar. The Connection Warnings section at the bottom flags suspicious connections.
 
 **CLI:**
 ```
@@ -345,7 +345,7 @@ jvm-monitor> instrument start com.myapp jdbc,socket_io
 
 ### Step 1: Check exception rate and hotspots
 
-**GUI:** Open the **Exceptions** tab. The rate chart shows exceptions/minute. The **Exception Hotspots** sub-tab identifies the exact code locations throwing the most exceptions.
+**GUI:** Open the **Exceptions** tab. If the exceptions module is not enabled, a yellow bar appears at the top with an "Enable" button -- click it to activate the module. The rate chart shows exceptions/minute. The **Exception Hotspots** sub-tab identifies the exact code locations throwing the most exceptions.
 
 **CLI:**
 ```

@@ -70,6 +70,13 @@ public class GcAnalysisPanel extends JPanel {
         causeTable.setDefaultRenderer(Object.class, new GcCauseCellRenderer());
         causeTable.setRowHeight(18);
         CsvExporter.install(causeTable);
+        /* GC Events: Time=90, Type=55, Cause=fills, Duration=80, Freed=75, Promoted=80 */
+        causeTable.getColumnModel().getColumn(0).setPreferredWidth(90); causeTable.getColumnModel().getColumn(0).setMaxWidth(110);
+        causeTable.getColumnModel().getColumn(1).setPreferredWidth(55); causeTable.getColumnModel().getColumn(1).setMaxWidth(70);
+        causeTable.getColumnModel().getColumn(2).setPreferredWidth(250);
+        causeTable.getColumnModel().getColumn(3).setPreferredWidth(80); causeTable.getColumnModel().getColumn(3).setMaxWidth(100);
+        causeTable.getColumnModel().getColumn(4).setPreferredWidth(75); causeTable.getColumnModel().getColumn(4).setMaxWidth(95);
+        causeTable.getColumnModel().getColumn(5).setPreferredWidth(80); causeTable.getColumnModel().getColumn(5).setMaxWidth(100);
         JScrollPane causeScroll = new JScrollPane(causeTable);
         causeScroll.setBorder(BorderFactory.createTitledBorder("Last 20 GC Events"));
 
@@ -87,6 +94,11 @@ public class GcAnalysisPanel extends JPanel {
         collectorTable.setAutoCreateRowSorter(true);
         collectorTable.setRowHeight(18);
         CsvExporter.install(collectorTable);
+        /* Collectors: Collector=180, Collections=80, Time=80, Memory Pools=fills */
+        collectorTable.getColumnModel().getColumn(0).setPreferredWidth(180);
+        collectorTable.getColumnModel().getColumn(1).setPreferredWidth(80); collectorTable.getColumnModel().getColumn(1).setMaxWidth(100);
+        collectorTable.getColumnModel().getColumn(2).setPreferredWidth(80); collectorTable.getColumnModel().getColumn(2).setMaxWidth(100);
+        collectorTable.getColumnModel().getColumn(3).setPreferredWidth(300);
 
         /* Bottom: tabbed panel */
         JTabbedPane bottomTabs = new JTabbedPane();
@@ -105,7 +117,7 @@ public class GcAnalysisPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
         List<GcEvent> events = collector.getStore().getGcEvents(from, now);
@@ -164,6 +176,15 @@ public class GcAnalysisPanel extends JPanel {
         summaryLabel.setText(String.format(
                 "GC Analysis: %d events  |  Avg freed: %.0f MB  |  Avg promoted: %.1f MB  |  Total freed: %.0f MB",
                 events.size(), avgFreed, avgPromoted, totalFreed / (1024.0 * 1024)));
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     /* ── GC Rectangle Chart ──────────────────────────── */
@@ -344,7 +365,9 @@ public class GcAnalysisPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            GcEvent e = data.get(data.size() - 1 - row);
+            int idx = data.size() - 1 - row;
+            if (idx < 0 || idx >= data.size()) return "";
+            GcEvent e = data.get(idx);
             switch (col) {
                 case 0: return sdf.format(new Date(e.getTimestamp()));
                 case 1: return e.getTypeName();

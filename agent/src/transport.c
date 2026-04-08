@@ -6,6 +6,7 @@
  */
 #include "jvmmon/transport.h"
 #include "jvmmon/protocol.h"
+#include "jvmmon/module_registry.h"
 #include <string.h>
 
 #define HEARTBEAT_INTERVAL_MS  5000
@@ -60,7 +61,10 @@ static void *accept_thread_fn(void *arg) {
         }
 
         jvmmon_socket_set_nodelay(client, 1);
+        /* Write client_sock before setting connected (memory barrier via atomic_store).
+         * Send/recv threads check connected first, then read client_sock. */
         ctx->client_sock = client;
+        __sync_synchronize(); /* full memory barrier before publishing connected=1 */
 
         /* Send handshake with agent info */
         if (send_handshake(ctx) < 0) {
@@ -114,6 +118,13 @@ static void *send_thread_fn(void *arg) {
                     continue;
                 }
                 last_send_time = now;
+            }
+            /* Check module auto-disable timers during idle periods */
+            if (ctx->command_user_data != NULL) {
+                jvmmon_agent_t *ag = (jvmmon_agent_t *)ctx->command_user_data;
+                if (ag->module_registry) {
+                    module_registry_check_timers(ag->module_registry);
+                }
             }
             jvmmon_sleep_ms(10);  /* 100 Hz polling when idle — balances latency vs CPU */
         }

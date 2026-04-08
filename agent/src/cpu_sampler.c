@@ -17,6 +17,10 @@
 
 #ifndef _WIN32
 
+/* Spinlock to prevent SPSC ring buffer corruption when SIGPROF
+ * interrupts a thread that is already inside ring_buffer_push. */
+static volatile int32_t sampler_lock = 0;
+
 static void sigprof_handler(int sig, siginfo_t *info, void *ucontext) {
     jvmmon_agent_t *agent = agent_get();
     (void)sig;
@@ -25,8 +29,12 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext) {
     if (agent->asgct == NULL) return;
     if (!jvmmon_atomic_load(&agent->running)) return;
 
+    /* Acquire spinlock — if re-entrant (interrupted during push), skip sample */
+    if (jvmmon_atomic_cas(&sampler_lock, 0, 1) != 0) return;
+
     JNIEnv *env;
     if ((*agent->jvm)->GetEnv(agent->jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        jvmmon_atomic_store(&sampler_lock, 0);
         return;
     }
 
@@ -38,7 +46,10 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext) {
 
     agent->asgct(&trace, CPU_SAMPLER_MAX_FRAMES, ucontext);
 
-    if (trace.num_frames <= 0) return;
+    if (trace.num_frames <= 0) {
+        jvmmon_atomic_store(&sampler_lock, 0);
+        return;
+    }
 
     /* Encode CPU sample message */
     uint8_t payload[JVMMON_MAX_PAYLOAD];
@@ -55,6 +66,7 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext) {
     }
 
     agent_send_message(JVMMON_MSG_CPU_SAMPLE, payload, (uint32_t)off);
+    jvmmon_atomic_store(&sampler_lock, 0);
 }
 
 #endif /* !_WIN32 */
@@ -64,32 +76,20 @@ static void sigprof_handler(int sig, siginfo_t *info, void *ucontext) {
 static void *sampler_thread_fn(void *arg) {
     cpu_sampler_t *cs = (cpu_sampler_t *)arg;
     jvmmon_agent_t *agent = cs->agent;
+    JNIEnv *env;
+
+    /* Attach this native thread to the JVM (required for JVMTI calls) */
+    if ((*agent->jvm)->AttachCurrentThread(agent->jvm, (void **)&env, NULL) != JNI_OK) {
+        LOG_ERROR("CPU sampler: failed to attach to JVM");
+        return NULL;
+    }
 
 #ifndef _WIN32
-    /* Linux: use SIGPROF to sample Java threads */
+    /* Linux: actual sampling happens in SIGPROF handler (async, no safepoint).
+     * This thread only needs to stay alive to keep the JVM attachment valid.
+     * No need for GetAllThreads/GetThreadInfo — that was wasted work. */
     while (jvmmon_atomic_load(&cs->running)) {
         if (!jvmmon_atomic_load(&agent->running)) break;
-
-        jthread *threads = NULL;
-        jint thread_count = 0;
-        jvmtiError err;
-
-        err = (*agent->jvmti)->GetAllThreads(agent->jvmti, &thread_count, &threads);
-        if (err == JVMTI_ERROR_NONE && threads != NULL) {
-            int i;
-            for (i = 0; i < thread_count; i++) {
-                jvmtiThreadInfo tinfo;
-                memset(&tinfo, 0, sizeof(tinfo));
-                err = (*agent->jvmti)->GetThreadInfo(agent->jvmti, threads[i], &tinfo);
-                if (err == JVMTI_ERROR_NONE && tinfo.name != NULL) {
-                    (*agent->jvmti)->Deallocate(agent->jvmti, (unsigned char *)tinfo.name);
-                }
-            }
-            (*agent->jvmti)->Deallocate(agent->jvmti, (unsigned char *)threads);
-        }
-
-        /* The actual sampling happens in SIGPROF handler.
-         * The timer set up via setitimer delivers SIGPROF periodically. */
         jvmmon_sleep_ms(cs->interval_ms);
     }
 #else
@@ -136,6 +136,7 @@ static void *sampler_thread_fn(void *arg) {
     }
 #endif
 
+    (*agent->jvm)->DetachCurrentThread(agent->jvm);
     return NULL;
 }
 

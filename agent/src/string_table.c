@@ -14,6 +14,8 @@ static void invoke_diagnostic_command(string_table_tracker_t *st, JNIEnv *env,
     int off = 0;
     off += protocol_encode_u64(payload + off, jvmmon_time_millis());
 
+    if ((*env)->PushLocalFrame(env, 32) < 0) return;
+
     jclass mf = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
     if (mf == NULL) goto done;
 
@@ -60,6 +62,7 @@ static void invoke_diagnostic_command(string_table_tracker_t *st, JNIEnv *env,
 
 done:
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->PopLocalFrame(env, NULL);
     agent_send_message(msg_type, payload, (uint32_t)off);
 }
 

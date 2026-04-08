@@ -56,7 +56,12 @@ int jvmmon_socket_send(jvmmon_socket_t sock, const void *buf, int len) {
     int remaining = len;
     while (remaining > 0) {
         ssize_t sent = send((int)sock, p, remaining, MSG_NOSIGNAL);
-        if (sent <= 0) return -1;
+        if (sent < 0) {
+            if (errno == EINTR) continue;       /* interrupted by signal, retry */
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue; /* transient */
+            return -1;
+        }
+        if (sent == 0) return -1; /* peer closed */
         p += sent;
         remaining -= (int)sent;
     }
@@ -68,7 +73,12 @@ int jvmmon_socket_recv(jvmmon_socket_t sock, void *buf, int len) {
     int remaining = len;
     while (remaining > 0) {
         ssize_t received = recv((int)sock, p, remaining, 0);
-        if (received <= 0) return -1;
+        if (received < 0) {
+            if (errno == EINTR) continue;       /* interrupted by signal, retry */
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue; /* transient */
+            return -1;
+        }
+        if (received == 0) return -1; /* peer closed */
         p += received;
         remaining -= (int)received;
     }

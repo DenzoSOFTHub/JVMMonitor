@@ -2,7 +2,7 @@
 
 ## Overview
 
-The JVMMonitor GUI is a Swing-based monitoring, profiling, and diagnostic console for JVM applications. It provides real-time charts, tables, and analysis tools across 15 tabs. All features work with zero external dependencies on any JDK 6+ platform.
+The JVMMonitor GUI is a Swing-based monitoring, profiling, and diagnostic console for JVM applications. It provides real-time charts, tables, and analysis tools across 16 tabs. All features work with zero external dependencies on any JDK 6+ platform.
 
 ## Starting the GUI
 
@@ -10,7 +10,7 @@ The JVMMonitor GUI is a Swing-based monitoring, profiling, and diagnostic consol
 java -jar jvmmonitor.jar gui
 ```
 
-The main window opens with the toolbar at the top, 15 tabs in the center, and a status bar at the bottom.
+The main window opens with the toolbar at the top, 16 tabs in the center, and a status bar at the bottom.
 
 ## Toolbar
 
@@ -19,9 +19,22 @@ The toolbar provides quick access to connection management:
 | Button | Action |
 |---|---|
 | **Connect** | Open a dialog to enter host and port of a running agent |
-| **Attach** | Inject the agent into a local JVM by PID (requires JDK) |
-| **Disconnect** | Close the current connection |
+| **Attach** | Inject the agent into a local JVM by PID (requires JDK). Opens the Attach dialog (see below). |
+| **Disconnect** | Close the collector's connection. The agent keeps running in the target JVM. |
+| **Detach** | Shut down the agent completely: stops all modules, closes transport, zero overhead. The agent becomes dormant and can be restarted via re-attach. |
 | **Refresh** | Force an immediate refresh of all panels |
+
+### Attach Dialog
+
+The Attach dialog provides a ComboBox to choose the agent type:
+
+| Agent type | Description |
+|---|---|
+| **Java Agent** (portable/recommended) | Pure Java agent, works on any JVM platform |
+| **Native Agent** | C JVMTI agent, full features, Linux/Windows only |
+| **Custom** | Browse for a custom agent file using a file chooser |
+
+The dialog shows a found/not found status for each agent file and automatically detects if an agent is already running on the specified port.
 
 The status bar at the bottom shows connection state (left) and agent info (right): PID, hostname, JVM version.
 
@@ -98,6 +111,14 @@ The Memory tab is split vertically into two halves:
 - **Thread Activity** — Stacked area chart classifying threads by what they are doing: DATABASE, NETWORK, DISK I/O, MESSAGING, WEB SERVICE, LOCK WAIT, APPLICATION, OTHER. Includes name filter (regex) and package filter fields.
 
 **Bottom half** — Thread table with columns: ID, Name, State, Daemon. States are color-coded: RUNNABLE (green), BLOCKED (red), WAITING/TIMED_WAITING (orange). The table is sortable by clicking column headers. Right-click for CSV export.
+
+## Module Activation Bars
+
+Panels that require on-demand agent modules (Exceptions, Locks, Network) display a **yellow activation bar** at the top when the required module is not enabled. The bar contains an "Enable" button that activates the module with a single click. When data starts arriving from the module, the bar turns **green** and shows a "Disable" button for deactivation. This allows direct module control from the panel without navigating to Tools > Agent Modules.
+
+## Background Refresh
+
+All panels update their data in the background via `updateData()`, not only the currently visible panel. This means that charts and tables are always current when you switch tabs -- there is no delay waiting for data to populate.
 
 ## Tab 5: Exceptions
 
@@ -215,6 +236,7 @@ JVMTI method entry/exit tracing with configurable probes.
 - Application packages field (e.g., `com.myapp`)
 - Probe checkboxes: JDBC/JPA, Spring, HTTP Client, JMS/Kafka/RabbitMQ, JavaMail, Cache/Redis
 - I/O Probes (off by default): Disk I/O, Socket I/O
+- **Capture params & return values** checkbox: when enabled, records method input parameters and return values as JSON. Max value length field controls truncation (also applies to SQL string truncation).
 - Start/Stop buttons
 
 **7 sub-tabs:**
@@ -227,7 +249,35 @@ JVMTI method entry/exit tracing with configurable probes.
 | **HTTP Profiler** | HTTP requests aggregated by URL: Method+URL, Count, Avg (ms), Max (ms), P95, Errors, Error%. |
 | **Disk I/O** | File operations by thread: Thread, Operation (READ/WRITE), File Path, Bytes, Duration, Count. Requires Disk I/O probe enabled. |
 | **Socket I/O** | Socket operations by thread: Thread, Operation (READ/WRITE/CONNECT/CLOSE), Remote Address, Bytes, Duration, Count. Requires Socket I/O probe enabled. |
-| **All Events** | Raw event table with all instrumentation events. |
+| **All Events** | Raw event table with all instrumentation events, including Web Probe user actions (type "USER"). |
+
+### Web Probe
+
+The Web Probe captures browser user actions without requiring any changes to the frontend code. It works by auto-injecting a JavaScript beacon into HTML responses served by the application.
+
+**Enabling the Web Probe:**
+- **Settings tab** > GUI & Instrumentation, or **Tools > Agent Modules** > enable "webprobe"
+- **CLI**: `enable webprobe 1`
+
+**What it captures:**
+- Page load timing (DNS, TCP, TTFB, DOM ready, full load time, page title)
+- Clicks (element tag, id, class, text content, href)
+- AJAX/XMLHttpRequest (method, URL, status code, duration)
+- Fetch API (method, URL, status, duration, errors)
+- JavaScript errors (message, file, line, column) and unhandled promise rejections
+- SPA navigation / route changes (works with Angular Router, React Router, Vue Router)
+- Form submits (action URL, method, form id)
+
+**Viewing Web Probe data:**
+
+User action events appear in the **Instrumentation** tab > **All Events** sub-tab with event type **USER**. Filter by Type = "USER" to see only browser actions.
+
+Each event shows:
+- **Thread**: `browser:<sessionId>` (unique per browser tab)
+- **Class**: the action type (click, ajax, fetch, pageload, jserror, navigate, submit)
+- **Context**: a human-readable description such as `CLICK BUTTON#submit-btn "Place Order"` or `POST /api/orders 201 145ms`
+
+See [docs/WebProbe-Guide.md](WebProbe-Guide.md) for the full Web Probe guide including deployment scenarios.
 
 ## Tab 13: System
 
@@ -289,6 +339,19 @@ Remote debugging with integrated decompiler.
 | **Auto-Diagnostics** | Run all 9 diagnostic rules. Shows findings with severity, category, problem, evidence, and suggested action. |
 | **Alarm Config** | Editable table of all 32 alarm threshold parameters. Apply, Save to File (.thresholds), Load from File, Reset Defaults buttons. |
 | **Session** | Save Session (compressed .jvmsession.gz), Load Session (replay), Export HTML Report. |
+
+## Tab 16: Settings
+
+The Settings tab provides a unified place for all JVMMonitor configuration. It contains 4 sub-tabs:
+
+| Sub-tab | Description |
+|---|---|
+| **Connection** | Host, port, auto-reconnect options, connection timeout. |
+| **GUI & Instrumentation** | Refresh interval, chart history length, instrumentation defaults (application packages, default probes, parameter capture settings, max value length). |
+| **Alarm Thresholds** | Editable table of all alarm threshold parameters (same as Tools > Alarm Config, but in a dedicated location). Apply, Reset Defaults buttons. |
+| **Import/Export** | Save all settings to file, load settings from file. Settings files are plain text (key=value), suitable for version control and deployment across environments. |
+
+All changes in the Settings tab take effect immediately when applied.
 
 ## Charts
 

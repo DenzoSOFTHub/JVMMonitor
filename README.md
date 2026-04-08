@@ -1,4 +1,4 @@
-# JVMMonitor v1.0.0
+# JVMMonitor v1.1.0
 
 A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI agent collects performance data from a running JVM and streams it over TCP to a Java collector with CLI, Swing GUI, and integrated Java decompiler.
 
@@ -36,12 +36,13 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
 - **Messaging** — queue depth, enqueue/dequeue rates, consumer lag, alerts for backlog/stale messages (JMS, Kafka, RabbitMQ)
 
 ### Instrumentation & Debugging
-- **Instrumentation** — JVMTI method entry/exit tracing with 8 configurable probes (JDBC/JPA, Spring, HTTP, JMS/Kafka/RabbitMQ, JavaMail, Cache/Redis, Disk I/O, Socket I/O)
+- **Instrumentation** — JVMTI method entry/exit tracing with 8 configurable probes (JDBC/JPA, Spring, HTTP, JMS/Kafka/RabbitMQ, JavaMail, Cache/Redis, Disk I/O, Socket I/O). Parameter capture: record input parameters and return values as JSON with configurable max value length. Also applies to SQL string truncation.
 - **Request Tracer** — end-to-end call chain visualization as expandable tree-table (TraceTreeTable) with timing per method
 - **JDBC Monitor** — 3 sub-tabs: SQL Statistics (aggregated by query), SQL Events (individual executions), Connection Monitor (open connections with thread, duration, leak detection)
 - **HTTP Profiler** — HTTP request tracking with method, URL, status, duration (filtered to HTTP methods only)
 - **Remote Debugger** — enable/disable toggle, conditional breakpoints, step over/into/out, variable inspection, watch expressions
 - **Source Viewer** — request class bytecode from agent, decompile on-the-fly with DenzoSOFT Java Decompiler, syntax highlighting (keywords, strings, comments, annotations, numbers)
+- **Web Probe** — captures browser user actions (clicks, navigations, AJAX/fetch requests, JavaScript errors, page load timing, form submits) without modifying frontend code. A JavaScript beacon is auto-injected into HTML responses via Servlet Filter instrumentation. Works with any web framework: Angular, React, Vue, plain HTML, JSP, Thymeleaf. Supports reverse proxy injection via Nginx (`sub_filter`), Apache (`mod_substitute`), Kubernetes Ingress annotations, and Spring Cloud Gateway filters. Manual script tag available for standalone frontends.
 
 ### Advanced Tools
 - **Field Watch** — monitor field read/write events with old/new values and access location
@@ -88,22 +89,28 @@ A comprehensive JVM profiling, monitoring, and diagnostic tool. A native JVMTI a
 sudo apt-get install -y build-essential gcc-mingw-w64-x86-64 default-jdk maven
 
 make        # Builds dist/linux/jvmmonitor.so + dist/windows/jvmmonitor.dll + dist/jvmmonitor.jar
+cd java-agent && mvn package    # Builds dist/jvmmonitor-agent.jar (pure Java agent)
 ```
 
 ### Run
 
 ```bash
-# Option 1: Start agent with application
+# Option 1: Native agent (Linux/Windows — full features)
 java -agentpath:dist/linux/jvmmonitor.so=port=9090 -jar your-app.jar
 
-# Option 2: Inject agent at runtime
+# Option 2: Java agent (any platform — macOS, AIX, Solaris, etc.)
+java -javaagent:dist/jvmmonitor-agent.jar=port=9090 -jar your-app.jar
+
+# Option 3: Inject agent at runtime (CLI)
 java -jar dist/jvmmonitor.jar attach <PID> --port 9090
 
-# Option 3: Swing GUI (default)
+# Option 4: Swing GUI (default) — Attach dialog lets you choose agent type:
+#   Java Agent (portable/recommended), Native Agent, or Custom (file browser)
+#   Shows found/not found status and detects if agent already running on port
 java -jar dist/jvmmonitor.jar
 java -jar dist/jvmmonitor.jar gui
 
-# Option 4: CLI (interactive)
+# Option 5: CLI (interactive)
 java -jar dist/jvmmonitor.jar cli
 java -jar dist/jvmmonitor.jar connect 127.0.0.1 9090
 
@@ -123,7 +130,7 @@ Comma-separated in `-agentpath` or attach:
 | `interval` | 10 | CPU sampling interval (ms) |
 | `monitor_interval` | 1000 | Memory/thread polling interval (ms) |
 
-## GUI Tabs (15)
+## GUI Tabs (16)
 
 | Tab | Description |
 |---|---|
@@ -142,6 +149,11 @@ Comma-separated in `-agentpath` or attach:
 | **System** | OS charts, processes, NMT, classloaders, JIT compiler |
 | **Debugger** | Enable/disable toggle, conditional breakpoints, stepping, variable watch, decompiled source viewer with syntax highlighting |
 | **Tools** | 17 sub-tabs: field watch, thread dump, deadlock detection, GC roots, JVM config, JMX browser, heap dump, thread control, monitor map, object lifetime, hot swap, agent modules, auto-diagnostics, alarm config, session |
+| **Settings** | Unified settings panel with 4 sub-tabs: Connection, GUI & Instrumentation, Alarm Thresholds, Import/Export. Central place for all configuration. |
+
+**Module activation bars:** Panels that require on-demand agent modules (Exceptions, Locks, Network) display a yellow bar with an "Enable" button when the module is not active. When data arrives, the bar turns green with a "Disable" button, allowing direct control from the panel.
+
+**Background refresh:** All panels update their data in the background (via `updateData()`), not only the currently visible panel. Charts and tables are always current when you switch tabs.
 
 ## CLI Commands
 
@@ -153,7 +165,8 @@ The CLI provides full feature parity with the GUI. Interactive prompt with `jvm-
 | `list` | List available JVMs (via Attach API) |
 | `attach <pid> [--port <port>]` | Inject agent into running JVM and connect |
 | `connect <host> <port>` | Connect to an agent already listening |
-| `disconnect` | Disconnect from agent |
+| `disconnect` | Disconnect collector from agent (agent keeps running) |
+| `detach` | Shut down agent completely: stops all modules, closes transport, zero overhead. Agent becomes dormant. Can be restarted via re-attach. |
 
 ### Monitoring
 | Command | Description |
@@ -194,6 +207,14 @@ The CLI provides full feature parity with the GUI. Interactive prompt with `jvm-
 | `threshold save <file>` | Save thresholds to file |
 | `threshold load <file>` | Load thresholds from file |
 
+### Settings
+| Command | Description |
+|---|---|
+| `settings show` | Display all current settings |
+| `settings set <key> <value>` | Change a setting value |
+| `settings save <file>` | Save settings to file |
+| `settings load <file>` | Load settings from file |
+
 ### Session & Tools
 | Command | Description |
 |---|---|
@@ -205,13 +226,66 @@ The CLI provides full feature parity with the GUI. Interactive prompt with `jvm-
 | `disable <module>` | Deactivate agent module |
 | `modules` | List agent modules and status |
 
+## Agent Comparison
+
+JVMMonitor ships with two agents: a C native agent (full features) and a pure Java agent (portable).
+
+### Native Agent (jvmmonitor.so / .dll)
+
+- **Platforms:** Linux, Windows
+- **Technology:** C + JVMTI native interface
+- **Attach:** `-agentpath:` at startup or runtime inject via Attach API (fully supported)
+- **Runtime injection:** Fixed in v1.1.0 -- AttachCurrentThread in thread_monitor and cpu_sampler, PushLocalFrame in jmx_reader, per-capability graceful fallback. Agent produces: Memory, Threads, CPU Usage, OS Metrics, GC events, Thread CPU. Network module auto-activated.
+- **All features available** including CPU sampling (AsyncGetCallTrace), breakpoints, field watch, method instrumentation, native memory tracking, heap walks
+
+### Java Agent (jvmmonitor-agent.jar)
+
+- **Platforms:** Any JVM (macOS, AIX, Solaris, Linux, Windows, z/OS, etc.)
+- **Technology:** Pure Java using `java.lang.management` MXBeans + `java.lang.instrument` + Javassist (shaded)
+- **Attach:** `-javaagent:` at startup
+- **Size:** ~900 KB (includes Javassist for bytecode instrumentation), Java 1.6+ compatible
+
+#### Java Agent — Available Features
+
+| Feature | Source | Notes |
+|---|---|---|
+| Memory (heap/non-heap) | MemoryMXBean | Full support |
+| GC events | GarbageCollectorMXBean | Notification API (Java 7+) or polling fallback (Java 6) |
+| Thread states | ThreadMXBean | Full support including daemon flag |
+| CPU usage (system/JVM) | com.sun.management (reflection) | Falls back gracefully on non-HotSpot JVMs |
+| Per-thread CPU time | ThreadMXBean.getThreadCpuTime() | Requires JVM support (most HotSpot do) |
+| OS metrics | /proc (Linux) + MXBean reflection | Partial: FD count, RSS on Linux; processors on all |
+| Classloader stats | ClassLoadingMXBean | Loaded/unloaded counts, loader hierarchy |
+| JIT compilation | CompilationMXBean | Cumulative time (no per-method detail) |
+| CPU sampling | ThreadMXBean.dumpAllThreads() | Safepoint-biased (less accurate than AsyncGetCallTrace) |
+| Class histogram | Instrumentation API | getAllLoadedClasses() + getObjectSize() |
+| Deadlock detection | ThreadMXBean.findDeadlockedThreads() | Full support |
+| Method instrumentation | Javassist bytecode rewriting | 8 probes: JDBC, Spring, HTTP, Messaging, Mail, Cache, Disk I/O, Socket I/O |
+| Hot swap (class redef) | Instrumentation.redefineClasses() | Supported where JVM allows |
+
+#### Java Agent — Limitations (JVMTI-only features)
+
+| Feature | Why not available | Workaround |
+|---|---|---|
+| AsyncGetCallTrace CPU sampling | JVMTI native-only API | Uses dumpAllThreads() — safepoint-biased but functional |
+| Breakpoints / stepping | JVMTI SetBreakpoint | Use IDE remote debug (JDWP) instead |
+| Field watch | JVMTI SetFieldAccessWatch | Not available |
+| Native memory tracking (NMT) | JVM diagnostic command | Not available |
+| Heap dump trigger | JVMTI IterateOverHeap | Use `jmap` or `jcmd` instead |
+| Thread suspend/resume/stop | JVMTI SuspendThread | Not available |
+| Network socket details | Reads /proc/self/net/tcp | Only available on Linux |
+| Crash handler | Native signal handlers | Not available (JVM handles signals) |
+
+**Recommendation:** Use the native agent on Linux/Windows for full features. Use the Java agent on other platforms or when native libraries cannot be deployed.
+
 ## Architecture
 
 ```
 JVM (JVMTI) → Agent modules → ring_buffer → TCP → Collector → EventStore → CLI / GUI / DiagnosisEngine
 ```
 
-- **Agent** = C native JVMTI library (jvmmonitor.so / .dll), TCP server
+- **Native Agent** = C JVMTI library (jvmmonitor.so / .dll), TCP server, Linux/Windows
+- **Java Agent** = Pure Java agent (jvmmonitor-agent.jar), TCP server, any JVM platform
 - **Collector** = Java application (jvmmonitor.jar), TCP client
 - **Protocol** = custom big-endian binary, 10-byte header (magic `JVMM`)
 - **Decompiler** = integrated DenzoSOFT Java Decompiler (Java 1.0-25)
@@ -222,12 +296,15 @@ JVM (JVMTI) → Agent modules → ring_buffer → TCP → Collector → EventSto
 ### Production Hardening
 - Thread-safe rate limiter with atomic CAS operations
 - Async-signal-safe crash handler (write() only, no malloc/fprintf)
-- Graceful JVMTI capability degradation (full → basic fallback)
+- Graceful per-capability JVMTI degradation (each capability requested individually, missing ones skipped gracefully)
+- Runtime injection fully supported: AttachCurrentThread for thread_monitor/cpu_sampler, PushLocalFrame for jmx_reader
+- Detach command: completely shuts down the agent (stops all modules, closes transport, zero overhead). Agent becomes dormant, can be restarted via re-attach.
 - Socket cleanup on connect error, stream close on disconnect
 - Method name cache capped at 10,000 entries (OOM prevention)
 - GUI refresh wrapped in try-catch (EDT crash prevention)
 - Histogram access synchronized (TOCTOU race prevention)
 - Transport idle polling at 100 Hz (was 1000 Hz)
+- Background refresh: all panels update data in background, not just the visible one
 
 ## Performance Impact
 
@@ -259,6 +336,7 @@ No collector connected = agent drains ring buffer silently with near-zero impact
 | `network` | <0.5% | Reads /proc/self/net/tcp every 5s |
 | Instrumentation | 5-15% | JVMTI MethodEntry/Exit on every instrumented call |
 | Debugger | **Pauses thread** | Stops execution at breakpoint — no overhead otherwise |
+| `webprobe` | <1% | ~1 KB extra per HTML response (script injection) + ~200 bytes per beacon POST |
 
 ### Design principle
 
@@ -270,6 +348,7 @@ The agent starts in **CORE mode** with only the 6 always-on components. All prof
 dist/
   linux/jvmmonitor.so       # Native agent for Linux (~103 KB)
   windows/jvmmonitor.dll    # Native agent for Windows (~416 KB)
+  jvmmonitor-agent.jar      # Pure Java agent, any platform (~900 KB, includes Javassist)
   jvmmonitor.jar            # Collector JAR (~830 KB, includes decompiler)
 ```
 
@@ -284,10 +363,11 @@ make test-java    # Java collector tests only
 ## Source Statistics
 
 - 98 Java source files (JVMMonitor collector)
+- 21 Java source files (JVMMonitor Java agent)
 - 139 Java source files (DenzoSOFT Java Decompiler, integrated)
 - 29 C source files (native agent)
 - 30 C header files
-- Total: ~296 source files, ~830 KB JAR
+- Total: ~317 source files
 
 ## License
 

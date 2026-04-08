@@ -31,8 +31,13 @@ public class InMemoryEventStore implements EventStore {
     private int jitWriteIdx = 0;
     private int jitCount = 0;
 
-    private final Map<Long, ThreadInfo> latestThreads =
-            Collections.synchronizedMap(new LinkedHashMap<Long, ThreadInfo>());
+    private static final int MAX_THREADS = 5000;
+    private final Map latestThreads =
+            Collections.synchronizedMap(new LinkedHashMap(64, 0.75f, true) {
+                protected boolean removeEldestEntry(Map.Entry eldest) {
+                    return size() > MAX_THREADS;
+                }
+            });
 
     private static final int SNAPSHOT_CAPACITY = 1000;
 
@@ -49,6 +54,7 @@ public class InMemoryEventStore implements EventStore {
     private static final int MAX_HISTOGRAMS = 20;
     private volatile NativeMemoryStats latestNativeMemory;
     private volatile GcDetail latestGcDetail;
+    private volatile JvmConfig latestJvmConfig;
     private volatile ClassloaderStats latestClassloaderStats;
     private volatile StringTableStats latestStringTableStats;
 
@@ -415,6 +421,14 @@ public class InMemoryEventStore implements EventStore {
 
     public GcDetail getLatestGcDetail() {
         return latestGcDetail;
+    }
+
+    public void storeJvmConfig(JvmConfig config) {
+        latestJvmConfig = config;
+    }
+
+    public JvmConfig getLatestJvmConfig() {
+        return latestJvmConfig;
     }
 
     public ClassloaderStats getLatestClassloaderStats() {

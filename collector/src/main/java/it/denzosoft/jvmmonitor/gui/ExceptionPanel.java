@@ -33,6 +33,7 @@ public class ExceptionPanel extends JPanel {
     private final JLabel summaryLabel;
     private final JTextArea stackTraceArea;
     private final HotspotTableModel hotspotModel;
+    private final ModuleActivationBar moduleBar;
 
     /* Accumulated rate data points */
     private final List<long[]> ratePoints = new ArrayList<long[]>();
@@ -44,9 +45,13 @@ public class ExceptionPanel extends JPanel {
         setLayout(new BorderLayout(5, 5));
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
+        JPanel northPanel = new JPanel(new BorderLayout());
+        moduleBar = new ModuleActivationBar(collector, "exceptions", "Exceptions", 1);
+        northPanel.add(moduleBar, BorderLayout.NORTH);
         summaryLabel = new JLabel("Exceptions: no data");
         summaryLabel.setFont(summaryLabel.getFont().deriveFont(Font.BOLD, 13f));
-        add(summaryLabel, BorderLayout.NORTH);
+        northPanel.add(summaryLabel, BorderLayout.SOUTH);
+        add(northPanel, BorderLayout.NORTH);
 
         /* Charts row */
         rateChart = new TimeSeriesChart("Exception Rate (per minute, 5 min)", "exc/min");
@@ -64,6 +69,14 @@ public class ExceptionPanel extends JPanel {
         final JTable table = new JTable(tableModel);
         table.setDefaultRenderer(Object.class, new ExcCellRenderer());
         table.setAutoCreateRowSorter(true);
+        table.setRowHeight(18);
+        /* Recent Events: Time=90, Exception=200, Message=fills, ThrownAt=180, Caught=50, Cause=180 */
+        table.getColumnModel().getColumn(0).setPreferredWidth(90); table.getColumnModel().getColumn(0).setMaxWidth(110);
+        table.getColumnModel().getColumn(1).setPreferredWidth(200);
+        table.getColumnModel().getColumn(2).setPreferredWidth(250);
+        table.getColumnModel().getColumn(3).setPreferredWidth(180);
+        table.getColumnModel().getColumn(4).setPreferredWidth(50); table.getColumnModel().getColumn(4).setMaxWidth(65);
+        table.getColumnModel().getColumn(5).setPreferredWidth(180);
 
         /* Listen for selection to show stack trace */
         table.getSelectionModel().addListSelectionListener(new ListSelectionListener() {
@@ -95,6 +108,13 @@ public class ExceptionPanel extends JPanel {
         hotspotTable.setAutoCreateRowSorter(true);
         hotspotTable.setRowHeight(18);
         CsvExporter.install(table);
+        /* Hotspots: #=35, CodeLocation=fills, ExcType=180, Count=60, %=55, Uncaught=60 */
+        hotspotTable.getColumnModel().getColumn(0).setPreferredWidth(35); hotspotTable.getColumnModel().getColumn(0).setMaxWidth(45);
+        hotspotTable.getColumnModel().getColumn(1).setPreferredWidth(280);
+        hotspotTable.getColumnModel().getColumn(2).setPreferredWidth(180);
+        hotspotTable.getColumnModel().getColumn(3).setPreferredWidth(60); hotspotTable.getColumnModel().getColumn(3).setMaxWidth(75);
+        hotspotTable.getColumnModel().getColumn(4).setPreferredWidth(55); hotspotTable.getColumnModel().getColumn(4).setMaxWidth(70);
+        hotspotTable.getColumnModel().getColumn(5).setPreferredWidth(60); hotspotTable.getColumnModel().getColumn(5).setMaxWidth(75);
 
         /* Bottom tabs: Events + Hotspots */
         JTabbedPane bottomTabs = new JTabbedPane();
@@ -122,6 +142,9 @@ public class ExceptionPanel extends JPanel {
     private void showStackTrace(ExceptionEvent exc) {
         StringBuilder sb = new StringBuilder();
         sb.append(exc.getDisplayName());
+        if (exc.getMessage() != null && exc.getMessage().length() > 0) {
+            sb.append(": ").append(exc.getMessage());
+        }
         sb.append("\n  thrown at ").append(exc.getThrowClass()).append('.').append(exc.getThrowMethod());
         sb.append(" (line ").append(exc.getThrowLocation()).append(')');
         if (exc.isCaught()) {
@@ -129,17 +152,24 @@ public class ExceptionPanel extends JPanel {
         } else {
             sb.append("\n  NOT CAUGHT");
         }
+        if (exc.getCauseClass() != null && exc.getCauseClass().length() > 0) {
+            sb.append("\n\nCaused by: ").append(exc.getCauseClass());
+            if (exc.getCauseMessage() != null && exc.getCauseMessage().length() > 0) {
+                sb.append(": ").append(exc.getCauseMessage());
+            }
+        }
         sb.append("\n\nStack Trace:\n");
         sb.append(exc.getStackTraceString());
         stackTraceArea.setText(sb.toString());
         stackTraceArea.setCaretPosition(0);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
 
         /* Rate chart */
         List<ExceptionEvent> recent60 = collector.getStore().getExceptions(now - 60000, now);
+        moduleBar.setDataReceived(!recent60.isEmpty());
         double rate = recent60.size();
 
         if (now - lastRateTs >= 2000) {
@@ -213,8 +243,17 @@ public class ExceptionPanel extends JPanel {
         hotspotModel.setData(hotspots, locationExcTypes, locationUncaught, recent60.size());
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     private static class ExcTableModel extends AbstractTableModel {
-        private final String[] COLS = {"Time", "Exception", "Thrown At", "Caught?", "Stack Depth"};
+        private final String[] COLS = {"Time", "Exception", "Message", "Thrown At", "Caught?", "Cause"};
         private final SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss.SSS");
         private List<ExceptionEvent> data = new ArrayList<ExceptionEvent>();
 
@@ -233,13 +272,21 @@ public class ExceptionPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            ExceptionEvent e = data.get(data.size() - 1 - row);
+            int idx = data.size() - 1 - row;
+            if (idx < 0 || idx >= data.size()) return "";
+            ExceptionEvent e = data.get(idx);
             switch (col) {
                 case 0: return sdf.format(new Date(e.getTimestamp()));
                 case 1: return e.getDisplayName();
-                case 2: return e.getThrowClass() + "." + e.getThrowMethod();
-                case 3: return e.isCaught() ? "yes" : "NO";
-                case 4: return Integer.valueOf(e.getStackDepth());
+                case 2: return e.getMessage() != null ? e.getMessage() : "";
+                case 3: return e.getThrowClass() + "." + e.getThrowMethod();
+                case 4: return e.isCaught() ? "yes" : "NO";
+                case 5: {
+                    String cause = e.getCauseClass();
+                    if (cause == null || cause.length() == 0) return "";
+                    String cm = e.getCauseMessage();
+                    return cause + (cm != null && cm.length() > 0 ? ": " + cm : "");
+                }
                 default: return "";
             }
         }
@@ -249,7 +296,7 @@ public class ExceptionPanel extends JPanel {
         public Component getTableCellRendererComponent(JTable table, Object value,
                 boolean isSelected, boolean hasFocus, int row, int col) {
             Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
-            if (col == 3 && !isSelected) {
+            if (col == 4 && !isSelected) {
                 c.setForeground("NO".equals(value) ? Color.RED : new Color(0, 128, 0));
                 c.setFont(c.getFont().deriveFont("NO".equals(value) ? Font.BOLD : Font.PLAIN));
             } else if (!isSelected) {
@@ -295,7 +342,10 @@ public class ExceptionPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            return data.get(row)[col];
+            if (row < 0 || row >= data.size()) return "";
+            String[] r = data.get(row);
+            if (col < 0 || col >= r.length) return "";
+            return r[col];
         }
     }
 

@@ -17,9 +17,15 @@ typedef struct exception_tracker {
     volatile int32_t caught_count;       /* total caught */
     volatile int32_t sent_count;         /* sent to client (rate limited) */
     volatile int32_t dropped_count;      /* skipped due to rate limit */
-    /* Rate limiter state */
-    uint64_t         window_start_ms;
-    int32_t          window_sent;
+    /* Rate limiter state — window_start_sec is truncated seconds (fits 32-bit for ~68 years) */
+    volatile int32_t window_start_sec;
+    volatile int32_t window_sent;
+    /* JNI method cache (resolved once, reused per exception) */
+    jclass     throwable_global;
+    jmethodID  getMessage;
+    jmethodID  getCause;
+    jmethodID  toString;
+    int        jni_cached;
 } exception_tracker_t;
 
 exception_tracker_t *exception_tracker_create(jvmmon_agent_t *agent);

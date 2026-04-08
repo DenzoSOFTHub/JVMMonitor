@@ -121,8 +121,11 @@ public class NewMessageTypesTest {
         dos.writeInt(8);                            /* total caught */
         dos.writeInt(2);                            /* total dropped */
         writeString(dos, "Ljava/lang/NullPointerException;");
-        writeString(dos, "com.example.Foo");
-        writeString(dos, "bar");
+        writeString(dos, "Something went wrong"); /* message (v1.1.0) */
+        writeString(dos, "");                      /* causeClass (v1.1.0) */
+        writeString(dos, "");                      /* causeMessage (v1.1.0) */
+        writeString(dos, "com.example.Foo");       /* throwClass */
+        writeString(dos, "bar");                   /* throwMethod */
         dos.writeLong(42);                          /* throw location */
         dos.writeByte(1);                           /* caught = true */
         writeString(dos, "com.example.Handler");

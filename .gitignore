@@ -19,3 +19,8 @@ Thumbs.db
 
 # Logs
 *.log
+.attach_pid*
+jvmmonitor-crash-*.txt
+*.hprof
+target
+jvmmonitor-signal-crash.txt

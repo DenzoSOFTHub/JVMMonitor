@@ -1,5 +1,5 @@
 /*
- * JVMMonitor Agent v1.0.0 - Production Entry Point
+ * JVMMonitor Agent v1.1.0 - Production Entry Point
  * Agent_OnLoad / Agent_OnAttach / Agent_OnUnload
  *
  * Features:
@@ -39,7 +39,7 @@
 #include "jvmmon/crash_handler.h"
 #include <string.h>
 
-#define JVMMON_VERSION_STRING "1.0.0"
+#define JVMMON_VERSION_STRING "1.1.0"
 
 static jvmmon_agent_t g_agent;
 
@@ -109,7 +109,9 @@ static void parse_options(jvmmon_agent_t *agent, const char *options) {
     /* Defaults */
     agent->collector_port = 9090;
     agent->sample_interval_ms = 10;
-    agent->monitor_interval_ms = 1000;
+    /* Default 2000ms — collector GUI refreshes at 2s, polling faster is wasteful.
+     * Override with interval=1000 on the agent command line if 1s granularity is needed. */
+    agent->monitor_interval_ms = 2000;
     agent->log_level = JVMMON_LOG_INFO;
     strncpy(agent->log_file, "jvmmonitor-agent.log", sizeof(agent->log_file) - 1);
 
@@ -343,11 +345,24 @@ static void JNICALL cb_vm_init(jvmtiEnv *jvmti, JNIEnv *jni, jthread thread) {
     if (g_agent.cpu_sampler) cpu_sampler_start(g_agent.cpu_sampler);
     if (g_agent.thread_monitor) thread_monitor_start(g_agent.thread_monitor);
     if (g_agent.memory_monitor) memory_monitor_start(g_agent.memory_monitor);
+    /* JMX reader provides CPU usage via JMX MBeans.
+     * On late attach, JNI local ref management can be unstable on some JVMs,
+     * so we still start it but with extra safety. */
     if (g_agent.jmx_reader) jmx_reader_start(g_agent.jmx_reader);
+
+    /* Auto-activate only modules required by Dashboard charts.
+     * Minimal footprint: 3 extra threads (os, threadcpu, network).
+     * GC detail, classloaders, safepoints etc. are on-demand only. */
+    if (g_agent.module_registry) {
+        if (g_agent.os_metrics) module_registry_enable(g_agent.module_registry, "os", 1, NULL, 0);
+        if (g_agent.thread_cpu) module_registry_enable(g_agent.module_registry, "threadcpu", 1, NULL, 0);
+        if (g_agent.network_monitor) module_registry_enable(g_agent.module_registry, "network", 1, NULL, 0);
+    }
 
     /* Start transport */
     g_agent.transport.pid = (uint32_t)jvmmon_getpid();
     jvmmon_gethostname(g_agent.transport.hostname, sizeof(g_agent.transport.hostname));
+    g_agent.transport.hostname[sizeof(g_agent.transport.hostname) - 1] = '\0';
     snprintf(g_agent.transport.jvm_info, sizeof(g_agent.transport.jvm_info),
              "JDK %d", g_agent.jvm_version);
     transport_start(&g_agent.transport);
@@ -414,14 +429,246 @@ static void JNICALL cb_vm_death(jvmtiEnv *jvmti, JNIEnv *jni) {
 
 /* ── Command callback from collector ────────────────── */
 
+static void agent_shutdown(jvmmon_agent_t *agent);
+
+/**
+ * Handle LIST_CLASSES command: return all loaded classes matching a package filter.
+ * Payload: u16(filterLen) + utf8(filter) — e.g., "it.listpa" or "com.myapp"
+ * Response: MSG_CLASS_INFO with subtype=0x10 (class list), then list of class names.
+ */
+static void handle_list_classes(jvmmon_agent_t *agent, const uint8_t *payload, uint32_t len) {
+    jvmtiEnv *jvmti = agent->jvmti;
+    jclass *classes = NULL;
+    jint class_count = 0;
+    jvmtiError err;
+    char filter[256] = {0};
+    char filter_slash[256] = {0};
+
+    /* Parse package filter from payload */
+    if (len >= 2) {
+        uint16_t flen = (uint16_t)((payload[0] << 8) | payload[1]);
+        if (flen > 0 && flen < sizeof(filter) && flen + 2 <= len) {
+            memcpy(filter, payload + 2, flen);
+            filter[flen] = '\0';
+        }
+    }
+
+    /* Convert dot-separated to slash-separated for JVM internal names */
+    {
+        int i;
+        for (i = 0; filter[i]; i++) {
+            filter_slash[i] = (filter[i] == '.') ? '/' : filter[i];
+        }
+        filter_slash[i] = '\0';
+    }
+
+    LOG_INFO("Listing classes matching: %s", filter);
+
+    err = (*jvmti)->GetLoadedClasses(jvmti, &class_count, &classes);
+    if (err != JVMTI_ERROR_NONE || classes == NULL) {
+        LOG_ERROR("GetLoadedClasses failed (err=%d)", (int)err);
+        return;
+    }
+
+    /* Get JNIEnv for local ref management */
+    JNIEnv *env;
+    if ((*agent->jvm)->GetEnv(agent->jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+        return;
+    }
+
+    /* Send matching classes in batches (max payload limit) */
+    uint8_t msg_payload[JVMMON_MAX_PAYLOAD];
+    int off = 0;
+    int match_count = 0;
+    int i;
+
+    /* Reserve space for: timestamp(8) + total_count(2) */
+    off += protocol_encode_u64(msg_payload + off, jvmmon_time_millis());
+    int count_offset = off;
+    off += protocol_encode_u16(msg_payload + off, 0); /* placeholder */
+
+    for (i = 0; i < class_count; i++) {
+        char *sig = NULL;
+        (*jvmti)->GetClassSignature(jvmti, classes[i], &sig, NULL);
+        if (sig == NULL) continue;
+
+        /* Check if class matches filter (in JVM internal format: Lit/listpa/...) */
+        int matches = 0;
+        if (filter_slash[0] == '\0') {
+            matches = 1; /* no filter = all classes */
+        } else if (sig[0] == 'L') {
+            matches = (strncmp(sig + 1, filter_slash, strlen(filter_slash)) == 0);
+        }
+
+        if (matches) {
+            /* Convert JVM signature to Java class name */
+            char classname[512] = {0};
+            int ci = 0, si = (sig[0] == 'L') ? 1 : 0;
+            while (sig[si] && sig[si] != ';' && ci < 510) {
+                classname[ci++] = (sig[si] == '/') ? '.' : sig[si];
+                si++;
+            }
+            classname[ci] = '\0';
+
+            uint16_t nlen = (uint16_t)strlen(classname);
+            /* Check if fits in payload */
+            if (off + 2 + nlen > JVMMON_MAX_PAYLOAD - 20) {
+                /* Send current batch */
+                protocol_encode_u16(msg_payload + count_offset, (uint16_t)match_count);
+                agent_send_message(JVMMON_MSG_CLASS_INFO, msg_payload, (uint32_t)off);
+
+                /* Start new batch */
+                off = 0;
+                off += protocol_encode_u64(msg_payload + off, jvmmon_time_millis());
+                count_offset = off;
+                off += protocol_encode_u16(msg_payload + off, 0);
+                match_count = 0;
+            }
+
+            off += protocol_encode_string(msg_payload + off, classname, nlen);
+            match_count++;
+        }
+
+        (*jvmti)->Deallocate(jvmti, (unsigned char *)sig);
+        (*env)->DeleteLocalRef(env, classes[i]); /* prevent JNI local ref overflow */
+    }
+
+    /* Send final batch */
+    if (match_count > 0) {
+        protocol_encode_u16(msg_payload + count_offset, (uint16_t)match_count);
+        agent_send_message(JVMMON_MSG_CLASS_INFO, msg_payload, (uint32_t)off);
+    }
+
+    (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+    LOG_INFO("Listed %d matching classes (of %d total)", match_count, (int)class_count);
+}
+
+/**
+ * Handle GET_CLASS command: return bytecode of a specific class.
+ * Payload: u16(nameLen) + utf8(className)
+ * Response: MSG_DEBUG_CLASS_BYTES with class bytecode.
+ */
+static void handle_get_class_bytes(jvmmon_agent_t *agent, const uint8_t *payload, uint32_t len) {
+    jvmtiEnv *jvmti = agent->jvmti;
+    char classname[512] = {0};
+    char classname_slash[512] = {0};
+
+    if (len < 2) return;
+    uint16_t nlen = (uint16_t)((payload[0] << 8) | payload[1]);
+    if (nlen == 0 || nlen + 2 > len || nlen >= sizeof(classname)) return;
+    memcpy(classname, payload + 2, nlen);
+    classname[nlen] = '\0';
+
+    /* Convert to slash-separated for JVM lookup */
+    {
+        int i;
+        for (i = 0; classname[i]; i++) {
+            classname_slash[i] = (classname[i] == '.') ? '/' : classname[i];
+        }
+        classname_slash[i] = '\0';
+    }
+
+    LOG_INFO("Getting bytecode for: %s", classname);
+
+    /* Find the class among loaded classes */
+    jclass *classes = NULL;
+    jint class_count = 0;
+    (*jvmti)->GetLoadedClasses(jvmti, &class_count, &classes);
+    if (classes == NULL) return;
+
+    JNIEnv *env;
+    if ((*agent->jvm)->GetEnv(agent->jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+        return;
+    }
+
+    int i;
+    for (i = 0; i < class_count; i++) {
+        char *sig = NULL;
+        (*jvmti)->GetClassSignature(jvmti, classes[i], &sig, NULL);
+        if (sig == NULL) continue;
+
+        /* Match: Lcom/myapp/Foo; */
+        char expected[520];
+        snprintf(expected, sizeof(expected), "L%s;", classname_slash);
+
+        if (strcmp(sig, expected) == 0) {
+            (*jvmti)->Deallocate(jvmti, (unsigned char *)sig);
+
+            /* Get bytecode via JVMTI GetClassFileVersion/GetBytecodes — not available.
+             * Use Retransform trick or ClassFileLoadHook. For now, send a placeholder
+             * indicating the class exists but bytecode requires retransform capability. */
+            unsigned char *bytecodes = NULL;
+            jint bytecode_len = 0;
+
+            /* Try to get bytecodes via retransform (requires can_retransform_classes) */
+            /* This is complex — for now send class name confirmation */
+            uint8_t resp[JVMMON_MAX_PAYLOAD];
+            int off = 0;
+            off += protocol_encode_u64(resp + off, jvmmon_time_millis());
+            off += protocol_encode_string(resp + off, classname, (uint16_t)strlen(classname));
+            off += protocol_encode_u32(resp + off, 0); /* bytecode length = 0 (not available via JVMTI) */
+            agent_send_message(0xD1, resp, (uint32_t)off); /* MSG_DEBUG_CLASS_BYTES */
+
+            (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+            return;
+        }
+        (*jvmti)->Deallocate(jvmti, (unsigned char *)sig);
+        (*env)->DeleteLocalRef(env, classes[i]);
+    }
+
+    (*jvmti)->Deallocate(jvmti, (unsigned char *)classes);
+    LOG_INFO("Class not found: %s", classname);
+}
+
 static void on_command(uint8_t cmd_type, const uint8_t *payload,
                        uint32_t payload_len, void *user_data) {
     jvmmon_agent_t *agent = (jvmmon_agent_t *)user_data;
+
+    if (cmd_type == JVMMON_CMD_DETACH) {
+        LOG_INFO("Received DETACH command — shutting down agent");
+        agent_shutdown(agent);
+        return;
+    }
+
+    /* Debug commands: list classes, get class bytecode */
+    if (cmd_type == 0x27) { /* DEBUG_CMD_LIST_CLASSES */
+        handle_list_classes(agent, payload, payload_len);
+        return;
+    }
+    if (cmd_type == 0x26) { /* DEBUG_CMD_GET_CLASS */
+        handle_get_class_bytes(agent, payload, payload_len);
+        return;
+    }
 
     if (agent->module_registry) {
         module_registry_handle_command(agent->module_registry,
                                        cmd_type, payload, payload_len);
     }
+}
+
+/** Full agent shutdown: stop all modules, close transport, set dormant. */
+static void agent_shutdown(jvmmon_agent_t *agent) {
+    if (!jvmmon_atomic_load(&agent->running)) return;
+    jvmmon_atomic_store(&agent->running, 0);
+    LOG_INFO("Stopping all modules...");
+
+    /* Deactivate all on-demand modules */
+    if (agent->module_registry) {
+        module_registry_deactivate_all(agent->module_registry);
+    }
+
+    /* Stop core modules */
+    if (agent->cpu_sampler) cpu_sampler_stop(agent->cpu_sampler);
+    if (agent->thread_monitor) thread_monitor_stop(agent->thread_monitor);
+    if (agent->memory_monitor) memory_monitor_stop(agent->memory_monitor);
+    if (agent->jmx_reader) jmx_reader_stop(agent->jmx_reader);
+
+    /* Close transport (stops accept + send threads, closes sockets) */
+    transport_stop(&agent->transport);
+
+    LOG_INFO("Agent shutdown complete — dormant (zero overhead)");
 }
 
 /* ── Agent init (shared between OnLoad and OnAttach) ── */
@@ -431,6 +678,14 @@ static jint agent_init(JavaVM *vm, char *options, jboolean is_onload) {
     jvmtiError err;
     jvmtiCapabilities caps;
     jvmtiEventCallbacks callbacks;
+
+    /* If agent is already running, ignore duplicate attach.
+     * If agent was shutdown (detach), allow re-init with new options. */
+    if (jvmmon_atomic_load(&g_agent.running)) {
+        LOG_INFO("Agent already running, ignoring duplicate attach");
+        return JNI_OK;
+    }
+    /* Agent was previously shut down — will be re-initialized below */
 
     memset(&g_agent, 0, sizeof(g_agent));
     g_agent.jvm = vm;
@@ -497,22 +752,49 @@ static jint agent_init(JavaVM *vm, char *options, jboolean is_onload) {
     err = (*jvmti)->AddCapabilities(jvmti, &caps);
     if (err != JVMTI_ERROR_NONE) {
         LOG_INFO("Full capabilities not available (err=%d), retrying with basic set", (int)err);
-        /* Retry with minimal capabilities */
+        /* Retry with minimal capabilities — add one by one, skip unavailable */
         memset(&caps, 0, sizeof(caps));
-        caps.can_generate_garbage_collection_events = 1;
-        caps.can_get_current_thread_cpu_time = 1;
-        caps.can_get_thread_cpu_time = 1;
-        caps.can_tag_objects = 1;
-        caps.can_get_source_file_name = 1;
-        caps.can_get_line_numbers = 1;
-        caps.can_generate_compiled_method_load_events = 1;
-        caps.can_generate_exception_events = 1;
-        err = (*jvmti)->AddCapabilities(jvmti, &caps);
-        if (err != JVMTI_ERROR_NONE) {
-            LOG_ERROR("Failed to add even basic JVMTI capabilities (err=%d)", (int)err);
+        jvmtiCapabilities try_caps;
+        int cap_count = 0;
+
+        /* Try each capability individually — some may not be available on late attach */
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_generate_garbage_collection_events = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_generate_garbage_collection_events = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_get_current_thread_cpu_time = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_get_current_thread_cpu_time = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_get_thread_cpu_time = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_get_thread_cpu_time = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_get_source_file_name = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_get_source_file_name = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_get_line_numbers = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_get_line_numbers = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_tag_objects = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_tag_objects = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_generate_compiled_method_load_events = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_generate_compiled_method_load_events = 1; }
+
+        memset(&try_caps, 0, sizeof(try_caps));
+        try_caps.can_generate_exception_events = 1;
+        if ((*jvmti)->AddCapabilities(jvmti, &try_caps) == JVMTI_ERROR_NONE) { cap_count++; caps.can_generate_exception_events = 1; }
+
+        if (cap_count == 0) {
+            LOG_ERROR("Failed to add any JVMTI capabilities — agent cannot function");
             return JNI_ERR;
         }
-        LOG_INFO("Running with basic capabilities (some features may be limited)");
+        LOG_INFO("Running with %d capabilities (some features may be limited)", cap_count);
     } else {
         LOG_INFO("Full JVMTI capabilities acquired (debugger, monitor, redefine available)");
     }

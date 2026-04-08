@@ -7,7 +7,7 @@
 
 #include "agent.h"
 
-#define MAX_SOCKETS 256
+#define MAX_SOCKETS 512
 
 /* TCP states (from kernel) */
 #define TCP_ESTABLISHED  1

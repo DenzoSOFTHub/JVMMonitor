@@ -1,5 +1,6 @@
 /*
  * JVMMonitor - Lock-free SPSC Ring Buffer Implementation
+ * Uses uint32_t head/tail to wrap safely at 2^32 (~136 years at 1000 msg/s).
  */
 #include "jvmmon/ring_buffer.h"
 #include <string.h>
@@ -21,10 +22,16 @@ void ring_buffer_destroy(ring_buffer_t *rb) {
 }
 
 int ring_buffer_push(ring_buffer_t *rb, const uint8_t *data, uint16_t len) {
-    int32_t head = jvmmon_atomic_load(&rb->head);
-    int32_t tail = jvmmon_atomic_load(&rb->tail);
+    /* Validate data fits in slot */
+    if (len > RING_BUFFER_SLOT_SIZE) {
+        jvmmon_atomic_add(&rb->dropped, 1);
+        return -1;
+    }
 
-    /* Full when (head - tail) == capacity */
+    uint32_t head = __sync_val_compare_and_swap(&rb->head, 0, 0); /* atomic load */
+    uint32_t tail = __sync_val_compare_and_swap(&rb->tail, 0, 0);
+
+    /* Full when (head - tail) == capacity. Unsigned subtraction wraps correctly. */
     if ((head - tail) >= RING_BUFFER_CAPACITY) {
         jvmmon_atomic_add(&rb->dropped, 1);
         return -1;
@@ -35,13 +42,14 @@ int ring_buffer_push(ring_buffer_t *rb, const uint8_t *data, uint16_t len) {
     memcpy(slot->data, data, len);
 
     /* Publish: store head after data is written */
-    jvmmon_atomic_store(&rb->head, head + 1);
+    __sync_synchronize();
+    __sync_lock_test_and_set(&rb->head, head + 1);
     return 0;
 }
 
 int ring_buffer_pop(ring_buffer_t *rb, uint8_t *out_buf) {
-    int32_t tail = jvmmon_atomic_load(&rb->tail);
-    int32_t head = jvmmon_atomic_load(&rb->head);
+    uint32_t tail = __sync_val_compare_and_swap(&rb->tail, 0, 0);
+    uint32_t head = __sync_val_compare_and_swap(&rb->head, 0, 0);
 
     if (tail == head) {
         return 0; /* empty */
@@ -49,19 +57,24 @@ int ring_buffer_pop(ring_buffer_t *rb, uint8_t *out_buf) {
 
     ring_slot_t *slot = &rb->slots[tail & RING_BUFFER_MASK];
     uint16_t len = slot->length;
+    if (len > RING_BUFFER_SLOT_SIZE) len = RING_BUFFER_SLOT_SIZE; /* safety clamp */
     memcpy(out_buf, slot->data, len);
 
     /* Publish: store tail after data is read */
-    jvmmon_atomic_store(&rb->tail, tail + 1);
+    __sync_synchronize();
+    __sync_lock_test_and_set(&rb->tail, tail + 1);
     return (int)len;
 }
 
 int ring_buffer_is_empty(ring_buffer_t *rb) {
-    return jvmmon_atomic_load(&rb->head) == jvmmon_atomic_load(&rb->tail);
+    return __sync_val_compare_and_swap(&rb->head, 0, 0)
+        == __sync_val_compare_and_swap(&rb->tail, 0, 0);
 }
 
 int ring_buffer_size(ring_buffer_t *rb) {
-    return jvmmon_atomic_load(&rb->head) - jvmmon_atomic_load(&rb->tail);
+    uint32_t h = __sync_val_compare_and_swap(&rb->head, 0, 0);
+    uint32_t t = __sync_val_compare_and_swap(&rb->tail, 0, 0);
+    return (int)(h - t);
 }
 
 int32_t ring_buffer_dropped(ring_buffer_t *rb) {

@@ -110,8 +110,14 @@ public class DemoSwingSession {
 
             System.out.println("All screenshots saved to " + screenshotDir);
         } else {
-            /* No screenshots, just run for 3 minutes */
-            Thread.sleep(180000);
+            /* No screenshots — keep running until user closes the window */
+            final Object lock = new Object();
+            frameHolder[0].addWindowListener(new java.awt.event.WindowAdapter() {
+                public void windowClosed(java.awt.event.WindowEvent e) {
+                    synchronized (lock) { lock.notifyAll(); }
+                }
+            });
+            synchronized (lock) { lock.wait(); }
         }
 
         /* Cleanup */

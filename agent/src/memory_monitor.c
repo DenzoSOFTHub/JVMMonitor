@@ -1,11 +1,45 @@
 /*
  * JVMMonitor - Memory Monitor Implementation
  * Polls heap/non-heap usage via JNI calls to Runtime and MemoryMXBean.
+ * JNI class/method IDs are cached after first resolution for efficiency.
  */
 #include "jvmmon/memory_monitor.h"
 #include "jvmmon/alarm_engine.h"
 #include "jvmmon/protocol.h"
 #include <string.h>
+
+/* Resolve and cache JNI class refs and method IDs on first call.
+ * jmethodID is stable for the lifetime of the class. jclass is kept as global ref. */
+static int ensure_cached(memory_monitor_t *mm, JNIEnv *env) {
+    if (mm->cached) return 1;
+
+    jclass rc = (*env)->FindClass(env, "java/lang/Runtime");
+    if (rc == NULL) { (*env)->ExceptionClear(env); return 0; }
+    mm->runtime_class_g = (jclass)(*env)->NewGlobalRef(env, rc);
+    (*env)->DeleteLocalRef(env, rc);
+
+    mm->get_runtime = (*env)->GetStaticMethodID(env, mm->runtime_class_g,
+        "getRuntime", "()Ljava/lang/Runtime;");
+    mm->total_mem = (*env)->GetMethodID(env, mm->runtime_class_g, "totalMemory", "()J");
+    mm->free_mem  = (*env)->GetMethodID(env, mm->runtime_class_g, "freeMemory", "()J");
+    mm->max_mem   = (*env)->GetMethodID(env, mm->runtime_class_g, "maxMemory", "()J");
+    if (!mm->get_runtime || !mm->total_mem || !mm->free_mem || !mm->max_mem) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+
+    jclass mf = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
+    if (mf != NULL) {
+        mm->mf_class_g = (jclass)(*env)->NewGlobalRef(env, mf);
+        (*env)->DeleteLocalRef(env, mf);
+        mm->get_mem_bean = (*env)->GetStaticMethodID(env, mm->mf_class_g,
+            "getMemoryMXBean", "()Ljava/lang/management/MemoryMXBean;");
+    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
+    mm->cached = 1;
+    return 1;
+}
 
 static void collect_memory_snapshot(memory_monitor_t *mm) {
     jvmmon_agent_t *agent = mm->agent;
@@ -17,71 +51,50 @@ static void collect_memory_snapshot(memory_monitor_t *mm) {
         return;
     }
 
-    /* Get heap info via Runtime */
-    jclass runtime_class = (*env)->FindClass(env, "java/lang/Runtime");
-    if (runtime_class != NULL) {
-        jmethodID get_runtime = (*env)->GetStaticMethodID(env, runtime_class,
-            "getRuntime", "()Ljava/lang/Runtime;");
-        if (get_runtime != NULL) {
-            jobject runtime = (*env)->CallStaticObjectMethod(env, runtime_class, get_runtime);
-            if (runtime != NULL) {
-                jmethodID total_mem = (*env)->GetMethodID(env, runtime_class, "totalMemory", "()J");
-                jmethodID free_mem = (*env)->GetMethodID(env, runtime_class, "freeMemory", "()J");
-                jmethodID max_mem = (*env)->GetMethodID(env, runtime_class, "maxMemory", "()J");
+    if (!ensure_cached(mm, env)) return;
 
-                if (total_mem && free_mem && max_mem) {
-                    jlong total = (*env)->CallLongMethod(env, runtime, total_mem);
-                    jlong free_m = (*env)->CallLongMethod(env, runtime, free_mem);
-                    heap_max = (*env)->CallLongMethod(env, runtime, max_mem);
-                    heap_used = total - free_m;
-                }
-                (*env)->DeleteLocalRef(env, runtime);
-            }
-        }
-        (*env)->DeleteLocalRef(env, runtime_class);
+    if ((*env)->PushLocalFrame(env, 16) < 0) return;
+
+    /* Get heap info via Runtime (cached method IDs) */
+    jobject runtime = (*env)->CallStaticObjectMethod(env, mm->runtime_class_g, mm->get_runtime);
+    if (runtime != NULL) {
+        jlong total = (*env)->CallLongMethod(env, runtime, mm->total_mem);
+        jlong free_m = (*env)->CallLongMethod(env, runtime, mm->free_mem);
+        heap_max = (*env)->CallLongMethod(env, runtime, mm->max_mem);
+        heap_used = total - free_m;
     }
 
-    /* Try to get MemoryMXBean for non-heap */
-    jclass mf_class = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
-    if (mf_class != NULL) {
-        jmethodID get_mem_bean = (*env)->GetStaticMethodID(env, mf_class,
-            "getMemoryMXBean", "()Ljava/lang/management/MemoryMXBean;");
-        if (get_mem_bean != NULL) {
-            jobject mem_bean = (*env)->CallStaticObjectMethod(env, mf_class, get_mem_bean);
-            if (mem_bean != NULL) {
-                jclass bean_class = (*env)->GetObjectClass(env, mem_bean);
-                jmethodID get_non_heap = (*env)->GetMethodID(env, bean_class,
+    /* Try to get non-heap via MemoryMXBean */
+    if (mm->mf_class_g != NULL && mm->get_mem_bean != NULL) {
+        jobject mem_bean = (*env)->CallStaticObjectMethod(env, mm->mf_class_g, mm->get_mem_bean);
+        if (mem_bean != NULL) {
+            jclass bean_class = (*env)->GetObjectClass(env, mem_bean);
+            /* Resolve non-heap method ID on first use */
+            if (mm->get_non_heap == NULL) {
+                mm->get_non_heap = (*env)->GetMethodID(env, bean_class,
                     "getNonHeapMemoryUsage", "()Ljava/lang/management/MemoryUsage;");
-                if (get_non_heap != NULL) {
-                    jobject usage = (*env)->CallObjectMethod(env, mem_bean, get_non_heap);
-                    if (usage != NULL) {
-                        jclass usage_class = (*env)->GetObjectClass(env, usage);
-                        jmethodID get_used = (*env)->GetMethodID(env, usage_class, "getUsed", "()J");
-                        jmethodID get_max2 = (*env)->GetMethodID(env, usage_class, "getMax", "()J");
-                        if (get_used) non_heap_used = (*env)->CallLongMethod(env, usage, get_used);
-                        if (get_max2) non_heap_max = (*env)->CallLongMethod(env, usage, get_max2);
-                        (*env)->DeleteLocalRef(env, usage_class);
-                        (*env)->DeleteLocalRef(env, usage);
-                    }
+            }
+            if (mm->get_non_heap != NULL) {
+                jobject usage = (*env)->CallObjectMethod(env, mem_bean, mm->get_non_heap);
+                if (usage != NULL) {
+                    jclass usage_class = (*env)->GetObjectClass(env, usage);
+                    if (mm->get_used == NULL)
+                        mm->get_used = (*env)->GetMethodID(env, usage_class, "getUsed", "()J");
+                    if (mm->get_max2 == NULL)
+                        mm->get_max2 = (*env)->GetMethodID(env, usage_class, "getMax", "()J");
+                    if (mm->get_used) non_heap_used = (*env)->CallLongMethod(env, usage, mm->get_used);
+                    if (mm->get_max2) non_heap_max = (*env)->CallLongMethod(env, usage, mm->get_max2);
                 }
-                (*env)->DeleteLocalRef(env, bean_class);
-                (*env)->DeleteLocalRef(env, mem_bean);
             }
         }
-        (*env)->DeleteLocalRef(env, mf_class);
     }
 
-    /* Clear any pending exceptions from JNI calls */
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
-    }
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->PopLocalFrame(env, NULL);
 
-    /* Encode memory snapshot
-     * Payload: timestamp(8) + heap_used(8) + heap_max(8) + non_heap_used(8) + non_heap_max(8)
-     */
+    /* Encode memory snapshot */
     uint8_t payload[64];
     int off = 0;
-
     off += protocol_encode_u64(payload + off, jvmmon_time_millis());
     off += protocol_encode_i64(payload + off, (int64_t)heap_used);
     off += protocol_encode_i64(payload + off, (int64_t)heap_max);
@@ -101,7 +114,6 @@ static void *poll_thread_fn(void *arg) {
     memory_monitor_t *mm = (memory_monitor_t *)arg;
     JNIEnv *env;
 
-    /* Attach this thread to the JVM */
     if ((*mm->agent->jvm)->AttachCurrentThread(mm->agent->jvm, (void **)&env, NULL) != JNI_OK) {
         return NULL;
     }
@@ -120,8 +132,9 @@ memory_monitor_t *memory_monitor_create(jvmmon_agent_t *agent, int interval_ms) 
     memory_monitor_t *mm = (memory_monitor_t *)jvmmon_calloc(1, sizeof(memory_monitor_t));
     if (mm == NULL) return NULL;
     mm->agent = agent;
-    mm->interval_ms = interval_ms > 0 ? interval_ms : 1000;
+    mm->interval_ms = interval_ms > 0 ? interval_ms : 2000;
     mm->running = 0;
+    mm->cached = 0;
     return mm;
 }
 
@@ -136,5 +149,10 @@ void memory_monitor_stop(memory_monitor_t *mm) {
 }
 
 void memory_monitor_destroy(memory_monitor_t *mm) {
-    if (mm != NULL) jvmmon_free(mm);
+    if (mm != NULL) {
+        /* Note: global refs (runtime_class_g, mf_class_g) are leaked intentionally —
+         * they're small and the JVM is shutting down when this runs. Attempting
+         * DeleteGlobalRef here requires a JNIEnv which may not be available. */
+        jvmmon_free(mm);
+    }
 }

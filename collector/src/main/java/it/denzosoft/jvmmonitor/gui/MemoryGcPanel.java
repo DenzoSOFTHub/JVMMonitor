@@ -106,6 +106,14 @@ public class MemoryGcPanel extends JPanel {
         histoTable.setAutoCreateRowSorter(true);
         histoTable.setRowHeight(18);
         CsvExporter.install(histoTable);
+        /* Histogram: #=35, Class=fills, Instances=75, Size(MB)=75, AvgSize=70, dInst=70, dSize=75 */
+        histoTable.getColumnModel().getColumn(0).setPreferredWidth(35); histoTable.getColumnModel().getColumn(0).setMaxWidth(45);
+        histoTable.getColumnModel().getColumn(1).setPreferredWidth(300);
+        histoTable.getColumnModel().getColumn(2).setPreferredWidth(75); histoTable.getColumnModel().getColumn(2).setMaxWidth(95);
+        histoTable.getColumnModel().getColumn(3).setPreferredWidth(75); histoTable.getColumnModel().getColumn(3).setMaxWidth(95);
+        histoTable.getColumnModel().getColumn(4).setPreferredWidth(70); histoTable.getColumnModel().getColumn(4).setMaxWidth(90);
+        histoTable.getColumnModel().getColumn(5).setPreferredWidth(70); histoTable.getColumnModel().getColumn(5).setMaxWidth(90);
+        histoTable.getColumnModel().getColumn(6).setPreferredWidth(75); histoTable.getColumnModel().getColumn(6).setMaxWidth(95);
         histoPanel.add(new JScrollPane(histoTable), BorderLayout.CENTER);
         analysisTabs.addTab("Histogram", histoPanel);
 
@@ -119,6 +127,7 @@ public class MemoryGcPanel extends JPanel {
         oldGenTable.setDefaultRenderer(Object.class, new OldGenCellRenderer());
         oldGenTable.setRowHeight(18);
         CsvExporter.install(oldGenTable);
+        setOldGenColWidths(oldGenTable);
         oldGenPanel.add(new JScrollPane(oldGenTable), BorderLayout.CENTER);
         analysisTabs.addTab("Old Gen Objects", oldGenPanel);
 
@@ -133,6 +142,7 @@ public class MemoryGcPanel extends JPanel {
         leakTable.setDefaultRenderer(Object.class, new OldGenCellRenderer());
         leakTable.setRowHeight(18);
         CsvExporter.install(leakTable);
+        setOldGenColWidths(leakTable);
         leakPanel.add(new JScrollPane(leakTable), BorderLayout.CENTER);
         analysisTabs.addTab("Leak Suspects", leakPanel);
 
@@ -151,6 +161,7 @@ public class MemoryGcPanel extends JPanel {
         bigObjTable.setAutoCreateRowSorter(true);
         bigObjTable.setRowHeight(18);
         CsvExporter.install(bigObjTable);
+        setOldGenColWidths(bigObjTable);
         bigObjPanel.add(new JScrollPane(bigObjTable), BorderLayout.CENTER);
         analysisTabs.addTab("Big Objects", bigObjPanel);
 
@@ -168,7 +179,17 @@ public class MemoryGcPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    /** OldGen table widths: Class=fills, Instances=75, Size(MB)=75, Growth=60, Size+/-=80, Survived=65 */
+    private static void setOldGenColWidths(JTable t) {
+        t.getColumnModel().getColumn(0).setPreferredWidth(280);
+        t.getColumnModel().getColumn(1).setPreferredWidth(75); t.getColumnModel().getColumn(1).setMaxWidth(95);
+        t.getColumnModel().getColumn(2).setPreferredWidth(75); t.getColumnModel().getColumn(2).setMaxWidth(95);
+        t.getColumnModel().getColumn(3).setPreferredWidth(60); t.getColumnModel().getColumn(3).setMaxWidth(80);
+        t.getColumnModel().getColumn(4).setPreferredWidth(80); t.getColumnModel().getColumn(4).setMaxWidth(100);
+        t.getColumnModel().getColumn(5).setPreferredWidth(65); t.getColumnModel().getColumn(5).setMaxWidth(85);
+    }
+
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
 
@@ -317,6 +338,15 @@ public class MemoryGcPanel extends JPanel {
         }
 
         allocPanel.refresh();
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
 

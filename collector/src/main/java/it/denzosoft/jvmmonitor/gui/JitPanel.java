@@ -107,7 +107,9 @@ public class JitPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            JitEvent e = data.get(data.size() - 1 - row);
+            int idx = data.size() - 1 - row;
+            if (idx < 0 || idx >= data.size()) return "";
+            JitEvent e = data.get(idx);
             switch (col) {
                 case 0: return sdf.format(new Date(e.getTimestamp()));
                 case 1: return e.getTypeName();

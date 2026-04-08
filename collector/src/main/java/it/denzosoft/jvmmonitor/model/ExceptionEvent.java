@@ -7,6 +7,9 @@ public final class ExceptionEvent {
     private final int totalCaught;
     private final int totalDropped;
     private final String exceptionClass;
+    private final String message;        /* exception.getMessage() */
+    private final String causeClass;     /* exception.getCause().getClass().getName() */
+    private final String causeMessage;   /* exception.getCause().getMessage() */
     private final String throwClass;
     private final String throwMethod;
     private final long throwLocation;
@@ -26,11 +29,24 @@ public final class ExceptionEvent {
                           String exceptionClass, String throwClass, String throwMethod,
                           long throwLocation, boolean caught, String catchClass, String catchMethod,
                           StackFrame[] stackFrames) {
+        this(timestamp, totalThrown, totalCaught, totalDropped, exceptionClass,
+             null, null, null,
+             throwClass, throwMethod, throwLocation, caught, catchClass, catchMethod, stackFrames);
+    }
+
+    public ExceptionEvent(long timestamp, int totalThrown, int totalCaught, int totalDropped,
+                          String exceptionClass, String message, String causeClass, String causeMessage,
+                          String throwClass, String throwMethod,
+                          long throwLocation, boolean caught, String catchClass, String catchMethod,
+                          StackFrame[] stackFrames) {
         this.timestamp = timestamp;
         this.totalThrown = totalThrown;
         this.totalCaught = totalCaught;
         this.totalDropped = totalDropped;
         this.exceptionClass = exceptionClass;
+        this.message = message;
+        this.causeClass = causeClass;
+        this.causeMessage = causeMessage;
         this.throwClass = throwClass;
         this.throwMethod = throwMethod;
         this.throwLocation = throwLocation;
@@ -45,6 +61,9 @@ public final class ExceptionEvent {
     public int getTotalCaught() { return totalCaught; }
     public int getTotalDropped() { return totalDropped; }
     public String getExceptionClass() { return exceptionClass; }
+    public String getMessage() { return message; }
+    public String getCauseClass() { return causeClass; }
+    public String getCauseMessage() { return causeMessage; }
     public String getThrowClass() { return throwClass; }
     public String getThrowMethod() { return throwMethod; }
     public long getThrowLocation() { return throwLocation; }
@@ -71,6 +90,23 @@ public final class ExceptionEvent {
             name = name.substring(1, name.length() - 1).replace('/', '.');
         }
         return name != null ? name : "Unknown";
+    }
+
+    /** Full display: ClassName: message [caused by CauseClass: causeMessage] */
+    public String getFullDescription() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(getDisplayName());
+        if (message != null && message.length() > 0) {
+            sb.append(": ").append(message);
+        }
+        if (causeClass != null && causeClass.length() > 0) {
+            sb.append(" [caused by ").append(causeClass);
+            if (causeMessage != null && causeMessage.length() > 0) {
+                sb.append(": ").append(causeMessage);
+            }
+            sb.append("]");
+        }
+        return sb.toString();
     }
 
     public static final class StackFrame {

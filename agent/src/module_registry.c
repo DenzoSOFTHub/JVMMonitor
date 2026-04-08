@@ -24,6 +24,19 @@ module_registry_t *module_registry_create(jvmmon_agent_t *agent) {
     return mr;
 }
 
+void module_registry_deactivate_all(module_registry_t *mr) {
+    if (mr == NULL) return;
+    int i;
+    jvmmon_mutex_lock(&mr->lock);
+    for (i = 0; i < mr->module_count; i++) {
+        if (mr->modules[i].current_level > 0 && mr->modules[i].deactivate) {
+            mr->modules[i].deactivate(mr->modules[i].current_level, mr->modules[i].ctx);
+            mr->modules[i].current_level = 0;
+        }
+    }
+    jvmmon_mutex_unlock(&mr->lock);
+}
+
 void module_registry_destroy(module_registry_t *mr) {
     if (mr == NULL) return;
     int i;
@@ -101,10 +114,21 @@ int module_registry_enable(module_registry_t *mr, const char *name,
 
     int old_level = m->current_level;
 
-    if (m->activate != NULL) {
-        if (m->activate(level, target, m->ctx) != 0) {
-            jvmmon_mutex_unlock(&mr->lock);
-            return -1;
+    if (level == 0 && old_level > 0) {
+        /* Deactivate: call deactivate callback, not activate(0) */
+        if (m->deactivate != NULL) {
+            m->deactivate(old_level, m->ctx);
+        }
+    } else if (level > 0) {
+        /* Deactivate old level first if changing levels */
+        if (old_level > 0 && old_level != level && m->deactivate != NULL) {
+            m->deactivate(old_level, m->ctx);
+        }
+        if (m->activate != NULL) {
+            if (m->activate(level, target, m->ctx) != 0) {
+                jvmmon_mutex_unlock(&mr->lock);
+                return -1;
+            }
         }
     }
 

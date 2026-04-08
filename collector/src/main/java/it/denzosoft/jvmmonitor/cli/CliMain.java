@@ -28,18 +28,24 @@ public class CliMain {
 
     public static void main(String[] args) {
         collector = new JVMMonitorCollector();
-        System.out.println("JVMMonitor v1.0.0");
+        System.out.println("JVMMonitor v1.1.0");
 
         /* Parse initial command from args */
         if (args.length > 0) {
             String cmd = args[0].toLowerCase();
             if ("connect".equals(cmd) && args.length >= 3) {
-                doConnect(args[1], Integer.parseInt(args[2]));
+                try {
+                    doConnect(args[1], Integer.parseInt(args[2]));
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid port: " + args[2]);
+                    return;
+                }
             } else if ("attach".equals(cmd) && args.length >= 2) {
                 int port = 9090;
                 for (int i = 2; i < args.length; i++) {
                     if ("--port".equals(args[i]) && i + 1 < args.length) {
-                        port = Integer.parseInt(args[++i]);
+                        try { port = Integer.parseInt(args[++i]); }
+                        catch (NumberFormatException e) { System.err.println("Invalid port: " + args[i]); return; }
                     }
                 }
                 doAttachAndConnect(args[1], port);
@@ -98,7 +104,8 @@ public class CliMain {
                 if (parts.length < 3) {
                     System.out.println("Usage: connect <host> <port>");
                 } else {
-                    doConnect(parts[1], Integer.parseInt(parts[2]));
+                    try { doConnect(parts[1], Integer.parseInt(parts[2])); }
+                    catch (NumberFormatException e) { System.out.println("Invalid port: " + parts[2]); }
                 }
             } else if ("attach".equals(cmd)) {
                 if (parts.length < 2) {
@@ -107,7 +114,8 @@ public class CliMain {
                     int port = 9090;
                     for (int i = 2; i < parts.length; i++) {
                         if ("--port".equals(parts[i]) && i + 1 < parts.length) {
-                            port = Integer.parseInt(parts[++i]);
+                            try { port = Integer.parseInt(parts[++i]); }
+                            catch (NumberFormatException e) { System.out.println("Invalid port"); }
                         }
                     }
                     doAttachAndConnect(parts[1], port);
@@ -115,6 +123,8 @@ public class CliMain {
             } else if ("disconnect".equals(cmd)) {
                 collector.disconnect();
                 System.out.println("Disconnected.");
+            } else if ("detach".equals(cmd)) {
+                handleDetach();
             } else if ("status".equals(cmd)) {
                 printStatus();
             } else if ("enable".equals(cmd)) {
@@ -173,6 +183,12 @@ public class CliMain {
                 handleExport(parts);
             } else if ("threshold".equals(cmd) || "thresholds".equals(cmd)) {
                 handleThreshold(parts);
+            } else if ("classes".equals(cmd)) {
+                handleClasses(parts);
+            } else if ("decompile".equals(cmd)) {
+                handleDecompile(parts);
+            } else if ("settings".equals(cmd) || "config".equals(cmd)) {
+                handleSettings(parts);
             } else if ("watch".equals(cmd)) {
                 handleWatch(parts);
             } else if ("list".equals(cmd)) {
@@ -205,18 +221,59 @@ public class CliMain {
 
     private static void doAttachAndConnect(String pid, int port) {
         try {
-            String agentPath = findAgentLibrary();
             String options = "port=" + port;
 
-            System.out.println("Injecting agent into PID " + pid + " (port " + port + ")...");
-            AttachHelper.attach(pid, agentPath, options);
+            /* Try Java agent first (portable), fall back to native */
+            String javaAgent = findJavaAgentPath();
+            if (javaAgent != null) {
+                System.out.println("Injecting Java agent into PID " + pid + " (port " + port + ")...");
+                System.out.println("Agent: " + javaAgent);
+                AttachHelper.attachJavaAgent(pid, javaAgent, options);
+            } else {
+                String nativeAgent = findAgentLibrary();
+                if (nativeAgent == null || !new java.io.File(nativeAgent).isFile()) {
+                    System.out.println("Agent not found. Place jvmmonitor-agent.jar or jvmmonitor.so in the current directory or dist/.");
+                    return;
+                }
+                System.out.println("Injecting native agent into PID " + pid + " (port " + port + ")...");
+                System.out.println("Agent: " + nativeAgent);
+                AttachHelper.attach(pid, nativeAgent, options);
+            }
             System.out.println("Agent injected. Connecting...");
 
-            Thread.sleep(1000); /* let agent start listening */
+            Thread.sleep(1500); /* let agent start listening */
             doConnect("127.0.0.1", port);
         } catch (Exception e) {
-            System.out.println("Failed to attach: " + e.getMessage());
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+            System.out.println("Failed to attach: " + msg);
         }
+    }
+
+    private static String getJarDir() {
+        try {
+            String path = CliMain.class.getProtectionDomain()
+                    .getCodeSource().getLocation().toURI().getPath();
+            return new java.io.File(path).getParent();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String findJavaAgentPath() {
+        String cwd = System.getProperty("user.dir");
+        String jarDir = getJarDir();
+        java.util.List paths = new java.util.ArrayList();
+        if (jarDir != null) {
+            paths.add(jarDir + "/jvmmonitor-agent.jar");
+            paths.add(jarDir + "/../jvmmonitor-agent.jar");
+        }
+        paths.add(cwd + "/jvmmonitor-agent.jar");
+        paths.add(cwd + "/dist/jvmmonitor-agent.jar");
+        for (int i = 0; i < paths.size(); i++) {
+            java.io.File f = new java.io.File((String) paths.get(i));
+            if (f.isFile()) return f.getAbsolutePath();
+        }
+        return null;
     }
 
     private static void handleEnable(String[] parts) throws IOException {
@@ -225,7 +282,9 @@ public class CliMain {
             return;
         }
         String module = parts[1];
-        int level = Integer.parseInt(parts[2]);
+        int level;
+        try { level = Integer.parseInt(parts[2]); }
+        catch (NumberFormatException e) { System.out.println("Invalid level: " + parts[2]); return; }
         String target = null;
         int duration = 300;
 
@@ -233,7 +292,8 @@ public class CliMain {
             if ("--target".equals(parts[i]) && i + 1 < parts.length) {
                 target = parts[++i];
             } else if ("--duration".equals(parts[i]) && i + 1 < parts.length) {
-                duration = Integer.parseInt(parts[++i]);
+                try { duration = Integer.parseInt(parts[++i]); }
+                catch (NumberFormatException e) { System.out.println("Invalid duration"); }
             }
         }
 
@@ -1137,6 +1197,236 @@ public class CliMain {
 
     /* ── Watch mode ───────────────────────────────── */
 
+    /* ── Settings ──────────────────────────── */
+
+    /* ── Classes / Decompile ────────────────── */
+
+    private static void handleClasses(String[] parts) {
+        AgentConnection conn = collector.getConnection();
+        if (conn == null || !conn.isConnected()) {
+            System.out.println("Not connected to any agent.");
+            return;
+        }
+        String filter = parts.length > 1 ? parts[1] : "";
+        System.out.println("Loading classes" + (filter.length() > 0 ? " matching " + filter + "..." : " (all)..."));
+
+        /* Register listener for CLASS_INFO responses */
+        final java.util.List classNames = new java.util.ArrayList();
+        conn.setDiagnosticListener(new AgentConnection.DiagnosticListener() {
+            public void onDiagnosticMessage(it.denzosoft.jvmmonitor.protocol.MessageType type,
+                                             it.denzosoft.jvmmonitor.protocol.EventMessage msg) {
+                if (type == it.denzosoft.jvmmonitor.protocol.MessageType.CLASS_INFO) {
+                    int off = 8;
+                    if (off + 2 > msg.getPayloadLength()) return;
+                    int count = msg.readU16(off); off += 2;
+                    for (int i = 0; i < count && off + 2 <= msg.getPayloadLength(); i++) {
+                        String name = msg.readString(off);
+                        off += msg.stringFieldLength(off);
+                        if (name != null && name.length() > 0) classNames.add(name);
+                    }
+                }
+            }
+        });
+
+        try {
+            conn.listClasses(filter);
+            Thread.sleep(2000); /* wait for response */
+        } catch (Exception e) {
+            System.out.println("Failed: " + e.getMessage());
+            return;
+        }
+
+        /* Filter out inner classes from display */
+        java.util.List outerClasses = new java.util.ArrayList();
+        int innerCount = 0;
+        for (int i = 0; i < classNames.size(); i++) {
+            String name = (String) classNames.get(i);
+            String simpleName = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
+            if (simpleName.contains("$")) {
+                innerCount++;
+            } else {
+                outerClasses.add(name);
+            }
+        }
+
+        java.util.Collections.sort(outerClasses);
+        System.out.println(outerClasses.size() + " classes (" + innerCount + " inner classes hidden):");
+        for (int i = 0; i < outerClasses.size(); i++) {
+            /* Count inner classes for this outer */
+            String outer = (String) outerClasses.get(i);
+            int inners = 0;
+            for (int j = 0; j < classNames.size(); j++) {
+                String cls = (String) classNames.get(j);
+                if (cls.startsWith(outer + "$")) inners++;
+            }
+            String suffix = inners > 0 ? " (+" + inners + " inner)" : "";
+            System.out.println("  " + outer + suffix);
+        }
+    }
+
+    private static void handleDecompile(String[] parts) {
+        if (parts.length < 2) {
+            System.out.println("Usage: decompile <className>");
+            System.out.println("  e.g.: decompile com.myapp.service.OrderService");
+            return;
+        }
+        AgentConnection conn = collector.getConnection();
+        if (conn == null || !conn.isConnected()) {
+            System.out.println("Not connected to any agent.");
+            return;
+        }
+        String className = parts[1];
+        System.out.println("Requesting bytecode for " + className + " (+ inner classes)...");
+        try {
+            conn.debugGetClassBytes(className);
+            /* Also request inner classes */
+            /* We need the class list to find inners — do a quick list */
+            final java.util.List allNames = new java.util.ArrayList();
+            conn.setDiagnosticListener(new AgentConnection.DiagnosticListener() {
+                public void onDiagnosticMessage(it.denzosoft.jvmmonitor.protocol.MessageType type,
+                                                 it.denzosoft.jvmmonitor.protocol.EventMessage msg) {
+                    if (type == it.denzosoft.jvmmonitor.protocol.MessageType.CLASS_INFO) {
+                        int off = 8;
+                        if (off + 2 > msg.getPayloadLength()) return;
+                        int count = msg.readU16(off); off += 2;
+                        for (int i = 0; i < count && off + 2 <= msg.getPayloadLength(); i++) {
+                            String name = msg.readString(off);
+                            off += msg.stringFieldLength(off);
+                            if (name != null) allNames.add(name);
+                        }
+                    }
+                }
+            });
+            String pkg = className.contains(".") ? className.substring(0, className.lastIndexOf('.')) : "";
+            conn.listClasses(pkg);
+            Thread.sleep(2000);
+
+            int innerRequested = 0;
+            for (int i = 0; i < allNames.size(); i++) {
+                String cls = (String) allNames.get(i);
+                if (cls.startsWith(className + "$")) {
+                    conn.debugGetClassBytes(cls);
+                    innerRequested++;
+                }
+            }
+
+            System.out.println("Decompilation requested for " + className +
+                    (innerRequested > 0 ? " + " + innerRequested + " inner class(es)" : ""));
+            System.out.println("Note: decompiled source appears in the GUI Source Viewer tab.");
+            System.out.println("Full bytecode decompilation requires the DenzoSOFT Java Decompiler (included in GUI).");
+        } catch (Exception e) {
+            System.out.println("Failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleDetach() {
+        AgentConnection conn = collector.getConnection();
+        if (conn == null || !conn.isConnected()) {
+            System.out.println("Not connected to any agent.");
+            return;
+        }
+        try {
+            System.out.println("Sending DETACH command to agent...");
+            System.out.println("This will stop all agent modules, close the transport,");
+            System.out.println("and remove all instrumentation. The agent becomes dormant.");
+            System.out.println("To restart, re-attach the agent to the JVM.");
+            conn.sendCommand(it.denzosoft.jvmmonitor.protocol.ProtocolConstants.CMD_DETACH, new byte[0]);
+            Thread.sleep(500);
+            collector.disconnect();
+            System.out.println("Agent detached and disconnected.");
+        } catch (Exception e) {
+            System.out.println("Detach failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleSettings(String[] parts) {
+        if (parts.length < 2) {
+            System.out.println("Usage: settings show | save <file> | load <file> | set <key> <value>");
+            System.out.println();
+            System.out.println("Keys:");
+            System.out.println("  connection.host        Host to connect to (default: 127.0.0.1)");
+            System.out.println("  connection.port        Port to connect to (default: 9090)");
+            System.out.println("  instr.defaultPackages  Default packages for instrumentation");
+            System.out.println("  instr.captureParams    Capture params & return values (true/false, default: false)");
+            System.out.println("  instr.maxValueLength   Max chars per value (-1=unlimited, default: 500)");
+            System.out.println();
+            System.out.println("  + all 'threshold' keys (use 'threshold show' to list)");
+            return;
+        }
+        String sub = parts[1].toLowerCase();
+        if ("show".equals(sub)) {
+            System.out.println(String.format("%-30s %s", "PARAMETER", "VALUE"));
+            System.out.println(String.format("%-30s %s", "connection.host", "127.0.0.1"));
+            System.out.println(String.format("%-30s %s", "connection.port", "9090"));
+            System.out.println(String.format("%-30s %s", "instr.defaultPackages", "com.myapp"));
+            System.out.println(String.format("%-30s %s", "instr.captureParams", "false"));
+            System.out.println(String.format("%-30s %s", "instr.maxValueLength", "500"));
+            System.out.println("---");
+            /* Also show thresholds */
+            Map map = collector.getThresholds().toMap();
+            Iterator it = map.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry entry = (Map.Entry) it.next();
+                System.out.println(String.format("%-30s %s", entry.getKey(), entry.getValue()));
+            }
+        } else if ("save".equals(sub)) {
+            String file = parts.length > 2 ? parts[2] : "jvmmonitor.settings";
+            try {
+                BufferedWriter w = new BufferedWriter(new FileWriter(file));
+                w.write("# JVMMonitor Settings v1.1.0\n\n");
+                w.write("# Connection\n");
+                w.write("connection.host=127.0.0.1\n");
+                w.write("connection.port=9090\n\n");
+                w.write("# Instrumentation\n");
+                w.write("instr.defaultPackages=com.myapp\n");
+                w.write("instr.captureParams=false\n");
+                w.write("instr.maxValueLength=500\n\n");
+                w.write("# Alarm Thresholds\n");
+                collector.getThresholds().save(new File(file + ".tmp"));
+                BufferedReader r = new BufferedReader(new FileReader(file + ".tmp"));
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (!line.startsWith("#")) w.write(line + "\n");
+                }
+                r.close();
+                new File(file + ".tmp").delete();
+                w.close();
+                System.out.println("Settings saved to " + file);
+            } catch (Exception e) {
+                System.out.println("Save failed: " + e.getMessage());
+            }
+        } else if ("load".equals(sub)) {
+            if (parts.length < 3) {
+                System.out.println("Usage: settings load <file>");
+                return;
+            }
+            try {
+                collector.getThresholds().load(new File(parts[2]));
+                System.out.println("Settings loaded from " + parts[2]);
+            } catch (Exception e) {
+                System.out.println("Load failed: " + e.getMessage());
+            }
+        } else if ("set".equals(sub)) {
+            if (parts.length < 4) {
+                System.out.println("Usage: settings set <key> <value>");
+                return;
+            }
+            /* Delegate to threshold if it's a threshold key */
+            String key = parts[2];
+            String val = parts[3];
+            Map map = collector.getThresholds().toMap();
+            if (map.containsKey(key)) {
+                String[] thParts = new String[]{"threshold", "set", key, val};
+                handleThreshold(thParts);
+            } else {
+                System.out.println("Setting " + key + " = " + val);
+                System.out.println("Note: connection and instrumentation settings take effect on next connect/start.");
+            }
+        } else {
+            System.out.println("Usage: settings show | save <file> | load <file> | set <key> <value>");
+        }
+    }
+
     private static void handleWatch(String[] parts) {
         if (parts.length < 2) {
             System.out.println("Usage: watch <command> [interval_sec]");
@@ -1146,7 +1436,11 @@ public class CliMain {
             return;
         }
         final String watchCmd = parts[1];
-        int interval = parts.length > 2 ? Integer.parseInt(parts[2]) : 5;
+        int interval = 5;
+        if (parts.length > 2) {
+            try { interval = Integer.parseInt(parts[2]); }
+            catch (NumberFormatException e) { System.out.println("Invalid interval, using default 5s"); }
+        }
         final int intervalMs = interval * 1000;
 
         System.out.println("Watching '" + watchCmd + "' every " + interval + "s. Press Enter to stop.\n");
@@ -1235,23 +1529,28 @@ public class CliMain {
     }
 
     private static String findAgentLibrary() {
-        String os = System.getProperty("os.name", "").toLowerCase();
-        String libName = os.contains("win") ? "jvmmonitor.dll" : "jvmmonitor.so";
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        String libName = osName.contains("win") ? "jvmmonitor.dll" : "jvmmonitor.so";
+        String subDir = osName.contains("win") ? "windows" : "linux";
+        String cwd = System.getProperty("user.dir");
+        String jarDir = getJarDir();
 
-        String jarDir = System.getProperty("user.dir");
-        String[] paths = new String[] {
-            jarDir + "/" + libName,
-            jarDir + "/dist/linux/" + libName,
-            jarDir + "/dist/windows/" + libName,
-            "/usr/local/lib/" + libName,
-        };
-
-        for (int i = 0; i < paths.length; i++) {
-            if (new java.io.File(paths[i]).exists()) {
-                return paths[i];
-            }
+        java.util.List paths = new java.util.ArrayList();
+        if (jarDir != null) {
+            paths.add(jarDir + "/" + subDir + "/" + libName);
+            paths.add(jarDir + "/" + libName);
+            paths.add(jarDir + "/../" + subDir + "/" + libName);
         }
-        return libName;
+        paths.add(cwd + "/" + libName);
+        paths.add(cwd + "/dist/" + subDir + "/" + libName);
+        paths.add(cwd + "/dist/" + libName);
+        paths.add("/usr/local/lib/" + libName);
+
+        for (int i = 0; i < paths.size(); i++) {
+            java.io.File f = new java.io.File((String) paths.get(i));
+            if (f.isFile()) return f.getAbsolutePath();
+        }
+        return null;
     }
 
     private static void printUsage() {
@@ -1267,7 +1566,8 @@ public class CliMain {
         System.out.println("  list                            List available JVMs");
         System.out.println("  attach <pid> [--port <port>]    Inject agent and connect");
         System.out.println("  connect <host> <port>           Connect to running agent");
-        System.out.println("  disconnect                      Disconnect from agent");
+        System.out.println("  disconnect                      Disconnect from agent (agent keeps running)");
+        System.out.println("  detach                          Shutdown agent completely (zero overhead, re-attachable)");
         System.out.println();
         System.out.println("Monitoring:");
         System.out.println("  status                          Overview (heap, events, alarms)");
@@ -1310,6 +1610,16 @@ public class CliMain {
         System.out.println("    [--duration <seconds>]        Auto-disable after N seconds");
         System.out.println("  disable <module>                Deactivate module");
         System.out.println("  modules                         List agent modules and status");
+        System.out.println();
+        System.out.println("Classes:");
+        System.out.println("  classes [package]               List loaded classes (e.g. classes com.myapp)");
+        System.out.println("  decompile <className>           Decompile class + inner classes");
+        System.out.println();
+        System.out.println("Settings:");
+        System.out.println("  settings show                   Show all configurable parameters");
+        System.out.println("  settings set <key> <value>      Change a setting");
+        System.out.println("  settings save <file>            Save all settings to file");
+        System.out.println("  settings load <file>            Load settings from file");
         System.out.println();
         System.out.println("Tools:");
         System.out.println("  watch <command> [interval_sec]  Auto-refresh (e.g. watch cpu 2)");

@@ -33,6 +33,7 @@ public class LockAnalysisPanel extends JPanel {
     private final LockTableModel tableModel;
     private final JTextArea detailArea;
     private final LockHotspotModel hotspotModel;
+    private final ModuleActivationBar moduleBar;
 
     /* Rate tracking */
     private final List<long[]> ratePoints = new ArrayList<long[]>();
@@ -44,9 +45,13 @@ public class LockAnalysisPanel extends JPanel {
         setLayout(new BorderLayout(5, 5));
         setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
-        summaryLabel = new JLabel("Lock Analysis: no data (enable locks module first)");
+        JPanel northPanel = new JPanel(new BorderLayout());
+        moduleBar = new ModuleActivationBar(collector, "locks", "Locks", 1);
+        northPanel.add(moduleBar, BorderLayout.NORTH);
+        summaryLabel = new JLabel("Lock Analysis: no data");
         summaryLabel.setFont(summaryLabel.getFont().deriveFont(Font.BOLD, 13f));
-        add(summaryLabel, BorderLayout.NORTH);
+        northPanel.add(summaryLabel, BorderLayout.SOUTH);
+        add(northPanel, BorderLayout.NORTH);
 
         /* Charts */
         contentionChart = new TimeSeriesChart("Lock Contentions (per minute, 5 min)", "cont/min");
@@ -148,9 +153,10 @@ public class LockAnalysisPanel extends JPanel {
         detailArea.setCaretPosition(0);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         List<LockEvent> recent60 = collector.getStore().getLockEvents(now - 60000, now);
+        moduleBar.setDataReceived(!recent60.isEmpty());
 
         /* Only count CONTENDED_ENTER events for the rate */
         int contentions = 0;
@@ -235,6 +241,15 @@ public class LockAnalysisPanel extends JPanel {
         hotspotModel.setData(hsSorted, hotspotLocks, hotspotWaiters, contentions);
     }
 
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
+    }
+
     /* ── Table Model ─────────────────────────────────── */
 
     private static class LockTableModel extends AbstractTableModel {
@@ -257,7 +272,9 @@ public class LockAnalysisPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
-            LockEvent e = data.get(data.size() - 1 - row);
+            int idx = data.size() - 1 - row;
+            if (idx < 0 || idx >= data.size()) return "";
+            LockEvent e = data.get(idx);
             switch (col) {
                 case 0: return sdf.format(new Date(e.getTimestamp()));
                 case 1: return e.getEventTypeName();
@@ -346,7 +363,11 @@ public class LockAnalysisPanel extends JPanel {
         public int getRowCount() { return data.size(); }
         public int getColumnCount() { return COLS.length; }
         public String getColumnName(int c) { return COLS[c]; }
-        public Object getValueAt(int row, int col) { return data.get(row)[col]; }
+        public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.size()) return "";
+            String[] r = data.get(row);
+            return (col >= 0 && col < r.length) ? r[col] : "";
+        }
     }
 
     private static class LockHotspotRenderer extends AlignedCellRenderer {

@@ -33,8 +33,10 @@ static int int_to_str(char *buf, int val) {
     char tmp[16];
     int len = 0;
     int neg = 0;
-    if (val < 0) { neg = 1; val = -val; }
-    while (val > 0 && len < 15) { tmp[len++] = '0' + (val % 10); val /= 10; }
+    /* Handle INT_MIN safely: negate using unsigned to avoid UB */
+    unsigned int uval;
+    if (val < 0) { neg = 1; uval = (unsigned int)(-(val + 1)) + 1u; } else { uval = (unsigned int)val; }
+    while (uval > 0 && len < 15) { tmp[len++] = '0' + (uval % 10); uval /= 10; }
     int pos = 0;
     if (neg) buf[pos++] = '-';
     for (int i = len - 1; i >= 0; i--) buf[pos++] = tmp[i];
@@ -69,7 +71,7 @@ static void write_vm_death_dump(crash_handler_t *ch, const char *reason) {
         return;
     }
 
-    fprintf(f, "=== JVMMonitor Crash Dump v1.0.0 ===\n");
+    fprintf(f, "=== JVMMonitor Crash Dump v1.1.0 ===\n");
     fprintf(f, "Reason: %s\n", reason);
     fprintf(f, "PID: %d\n", (int)jvmmon_getpid());
     char hostname[256] = {0};

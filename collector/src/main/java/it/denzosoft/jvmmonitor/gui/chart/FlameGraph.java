@@ -125,7 +125,7 @@ public class FlameGraph extends JPanel {
         /* Children: proportional width */
         int childX = x;
         for (FlameNode child : node.children.values()) {
-            int childW = (int)((double) child.count / node.count * width);
+            int childW = node.count > 0 ? (int)((double) child.count / node.count * width) : 1;
             if (childW < 1) childW = 1;
             drawNode(g2, child, childX, childW, baseY, barH, depth + 1);
             childX += childW;

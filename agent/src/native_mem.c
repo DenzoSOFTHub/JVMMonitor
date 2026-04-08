@@ -14,6 +14,9 @@ static void collect_native_mem(native_mem_tracker_t *nm, JNIEnv *env) {
     int off = 0;
     off += protocol_encode_u64(payload + off, jvmmon_time_millis());
 
+    /* PushLocalFrame to prevent JNI local ref leaks from MBeanServer calls */
+    if ((*env)->PushLocalFrame(env, 32) < 0) return;
+
     /* Get DiagnosticCommandMBean via MBeanServer */
     jclass mf = (*env)->FindClass(env, "java/lang/management/ManagementFactory");
     if (mf == NULL) goto fallback;
@@ -76,12 +79,12 @@ static void collect_native_mem(native_mem_tracker_t *nm, JNIEnv *env) {
     }
 
     agent_send_message(JVMMON_MSG_NATIVE_MEM, payload, (uint32_t)off);
-
-    (*env)->DeleteLocalRef(env, mf);
+    (*env)->PopLocalFrame(env, NULL);
     return;
 
 fallback:
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->PopLocalFrame(env, NULL);
     /* NMT not available — send flag */
     off = 0;
     off += protocol_encode_u64(payload + off, jvmmon_time_millis());

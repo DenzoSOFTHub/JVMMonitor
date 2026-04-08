@@ -22,6 +22,8 @@ public class DiagnosisEngine {
         rules.add(new CpuSaturationRule());
         rules.add(new ConnectionLeakRule());
         rules.add(new ResponseDegradationRule());
+        rules.add(new GcTuningRule());
+        rules.add(new JvmFlagsRule());
     }
 
     public void addRule(DiagnosticRule rule) {

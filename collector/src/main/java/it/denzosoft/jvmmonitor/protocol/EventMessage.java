@@ -24,18 +24,21 @@ public final class EventMessage {
         return payload != null ? payload.length : 0;
     }
 
-    /* Big-endian read helpers */
+    /* Big-endian read helpers — all methods validate bounds before access. */
 
     public int readU8(int offset) {
+        if (payload == null || offset < 0 || offset >= payload.length) return 0;
         return payload[offset] & 0xFF;
     }
 
     public int readU16(int offset) {
+        if (payload == null || offset < 0 || offset + 2 > payload.length) return 0;
         return ((payload[offset] & 0xFF) << 8)
              | (payload[offset + 1] & 0xFF);
     }
 
     public long readU32(int offset) {
+        if (payload == null || offset < 0 || offset + 4 > payload.length) return 0;
         return ((long)(payload[offset] & 0xFF) << 24)
              | ((long)(payload[offset + 1] & 0xFF) << 16)
              | ((long)(payload[offset + 2] & 0xFF) << 8)
@@ -43,6 +46,7 @@ public final class EventMessage {
     }
 
     public long readU64(int offset) {
+        if (payload == null || offset < 0 || offset + 8 > payload.length) return 0;
         return ((long)(payload[offset] & 0xFF) << 56)
              | ((long)(payload[offset + 1] & 0xFF) << 48)
              | ((long)(payload[offset + 2] & 0xFF) << 40)
@@ -62,8 +66,14 @@ public final class EventMessage {
     }
 
     public String readString(int offset) {
+        if (payload == null || offset < 0 || offset + 2 > payload.length) return "";
         int len = readU16(offset);
         if (len == 0) return "";
+        if (offset + 2 + len > payload.length) {
+            /* Truncated string — read what we can */
+            len = payload.length - offset - 2;
+            if (len <= 0) return "";
+        }
         try {
             return new String(payload, offset + 2, len, "UTF-8");
         } catch (UnsupportedEncodingException e) {
@@ -72,7 +82,13 @@ public final class EventMessage {
     }
 
     public int stringFieldLength(int offset) {
-        return 2 + readU16(offset);
+        if (payload == null || offset < 0 || offset + 2 > payload.length) return 2;
+        int len = readU16(offset);
+        /* Clamp to available payload to prevent callers from advancing past end */
+        if (offset + 2 + len > payload.length) {
+            return payload.length - offset;
+        }
+        return 2 + len;
     }
 
     public long getTimestamp() {

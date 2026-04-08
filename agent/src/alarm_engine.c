@@ -33,6 +33,7 @@ static void add_rule(alarm_engine_t *ae, int type, int severity, double threshol
     r->active = 0;
     r->last_fired = 0;
     strncpy(r->message, msg, sizeof(r->message) - 1);
+    r->message[sizeof(r->message) - 1] = '\0';
 }
 
 void alarm_engine_add_defaults(alarm_engine_t *ae) {

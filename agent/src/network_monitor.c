@@ -136,12 +136,13 @@ static void collect_and_send(network_monitor_t *nm) {
     off += protocol_encode_i64(payload + off, counters.out_rsts);
     off += protocol_encode_i64(payload + off, counters.curr_estab);
 
-    /* Socket list */
-    int send_count = count < 200 ? count : 200;
+    /* Socket list — cap to fit within MAX_PAYLOAD (each socket = 21 bytes,
+     * header = 74 bytes, so max ~386 sockets per message. Use 350 for safety.) */
+    int send_count = count < 350 ? count : 350;
     off += protocol_encode_u16(payload + off, (uint16_t)send_count);
 
     int i;
-    for (i = 0; i < send_count && off < (int)(JVMMON_MAX_PAYLOAD - 20); i++) {
+    for (i = 0; i < send_count && off < (int)(JVMMON_MAX_PAYLOAD - 22); i++) {
         socket_entry_t *s = &sockets[i];
         off += protocol_encode_u32(payload + off, s->local_addr);
         off += protocol_encode_u16(payload + off, s->local_port);

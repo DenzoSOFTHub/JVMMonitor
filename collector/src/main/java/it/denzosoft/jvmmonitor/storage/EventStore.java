@@ -25,6 +25,8 @@ public interface EventStore {
     void storeProcessInfo(ProcessInfo info);
     void storeAllocationEvent(AllocationEvent event);
     void storeInstrumentationEvent(InstrumentationEvent event);
+    void storeJvmConfig(JvmConfig config);
+    JvmConfig getLatestJvmConfig();
 
     List<CpuSample> getCpuSamples(long fromTimestamp, long toTimestamp);
     List<GcEvent> getGcEvents(long fromTimestamp, long toTimestamp);

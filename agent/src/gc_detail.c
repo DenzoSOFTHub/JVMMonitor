@@ -25,6 +25,13 @@ static void collect_gc_detail(gc_detail_t *gd, JNIEnv *env) {
     jclass listClass = (*env)->GetObjectClass(env, gcList);
     jmethodID size = (*env)->GetMethodID(env, listClass, "size", "()I");
     jmethodID get = (*env)->GetMethodID(env, listClass, "get", "(I)Ljava/lang/Object;");
+    if (size == NULL || get == NULL) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, listClass);
+        (*env)->DeleteLocalRef(env, gcList);
+        (*env)->DeleteLocalRef(env, mf);
+        return;
+    }
     jint count = (*env)->CallIntMethod(env, gcList, size);
 
     off += protocol_encode_u16(payload + off, (uint16_t)count);
@@ -43,6 +50,12 @@ static void collect_gc_detail(gc_detail_t *gd, JNIEnv *env) {
                 "getCollectionTime", "()J");
         jmethodID getPools = (*env)->GetMethodID(env, gcClass,
                 "getMemoryPoolNames", "()[Ljava/lang/String;");
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if (getName == NULL || getCount == NULL || getTime == NULL) {
+            (*env)->DeleteLocalRef(env, gcClass);
+            (*env)->DeleteLocalRef(env, gcBean);
+            continue;
+        }
 
         jstring nameStr = (jstring)(*env)->CallObjectMethod(env, gcBean, getName);
         jlong gcCount = (*env)->CallLongMethod(env, gcBean, getCount);

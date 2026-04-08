@@ -30,6 +30,10 @@ public class SystemResourcesPanel extends JPanel {
     private final ClassloaderTableModel clModel;
     private final ProcessTableModel procModel;
     private final JLabel procSummaryLabel;
+    private final TimeSeriesChart procCpuChart;
+    /* History buffer for top-5 process CPU chart */
+    private final List[] procCpuHistory = new List[5];
+    private static final int MAX_PROC_HISTORY = 150; /* ~5 min at 2s intervals */
     private final JitPanel jitPanel;
 
     public SystemResourcesPanel(JVMMonitorCollector collector) {
@@ -73,17 +77,33 @@ public class SystemResourcesPanel extends JPanel {
         JScrollPane clScroll = new JScrollPane(clTable);
         clScroll.setBorder(BorderFactory.createTitledBorder("Classloaders"));
 
-        /* Process list */
+        /* Process list + CPU chart */
         JPanel procPanel = new JPanel(new BorderLayout());
         procSummaryLabel = new JLabel("Processes: waiting for data...");
         procSummaryLabel.setFont(procSummaryLabel.getFont().deriveFont(Font.BOLD, 12f));
         procPanel.add(procSummaryLabel, BorderLayout.NORTH);
+
+        procCpuChart = new TimeSeriesChart("Top Process CPU (5 min)", "%");
+        Color[] procColors = {
+            new Color(220, 60, 60), new Color(30, 130, 200), new Color(50, 160, 50),
+            new Color(200, 130, 30), new Color(150, 80, 200)
+        };
+        for (int i = 0; i < 5; i++) {
+            procCpuChart.defineSeries("proc" + i, procColors[i], false);
+        }
+        procCpuChart.setFixedMaxY(100);
+        procCpuChart.setShowLegend(false);
+        procCpuChart.setPreferredSize(new Dimension(0, 120));
+        for (int i = 0; i < 5; i++) procCpuHistory[i] = new java.util.ArrayList();
+
         procModel = new ProcessTableModel();
         JTable procTable = new JTable(procModel);
         procTable.setDefaultRenderer(Object.class, new ProcessCellRenderer());
         procTable.setAutoCreateRowSorter(true);
         procTable.setRowHeight(18);
         CsvExporter.install(procTable);
+
+        procPanel.add(procCpuChart, BorderLayout.NORTH);
         procPanel.add(new JScrollPane(procTable), BorderLayout.CENTER);
 
         /* Bottom tabs */
@@ -114,7 +134,7 @@ public class SystemResourcesPanel extends JPanel {
         add(split, BorderLayout.CENTER);
     }
 
-    public void refresh() {
+    public void updateData() {
         long now = System.currentTimeMillis();
         long from = now - 300000;
 
@@ -170,10 +190,11 @@ public class SystemResourcesPanel extends JPanel {
         ClassloaderStats cls = collector.getStore().getLatestClassloaderStats();
         clModel.setData(cls);
 
-        /* Process list */
+        /* Process list + CPU chart */
         ProcessInfo procInfo = collector.getStore().getLatestProcessInfo();
         if (procInfo != null) {
-            procModel.setData(procInfo.getTopProcesses());
+            ProcessInfo.ProcessEntry[] procs = procInfo.getTopProcesses();
+            procModel.setData(procs);
             procSummaryLabel.setText(String.format(
                     "Processes: %d total  |  RAM: %.0f MB used / %.0f MB total (%.0f%%)  |  Swap: %.0f MB  |  Load: %.1f / %.1f / %.1f",
                     procInfo.getTotalProcesses(),
@@ -181,10 +202,34 @@ public class SystemResourcesPanel extends JPanel {
                     procInfo.getUsedMemoryPercent(),
                     procInfo.getSwapUsedBytes() / (1024.0 * 1024.0),
                     procInfo.getLoadAvg1(), procInfo.getLoadAvg5(), procInfo.getLoadAvg15()));
+
+            /* Accumulate top-5 process CPU in history for chart */
+            if (procs != null) {
+                int top = Math.min(procs.length, 5);
+                for (int i = 0; i < 5; i++) {
+                    if (i < top && procs[i] != null) {
+                        procCpuHistory[i].add(TimeSeriesChart.point(now, procs[i].cpuPercent));
+                    }
+                    /* Evict old entries */
+                    while (procCpuHistory[i].size() > MAX_PROC_HISTORY) {
+                        procCpuHistory[i].remove(0);
+                    }
+                    procCpuChart.setSeriesData("proc" + i, procCpuHistory[i]);
+                }
+            }
         }
 
         /* JIT */
         jitPanel.refresh();
+    }
+
+    public void render() {
+        repaint();
+    }
+
+    public void refresh() {
+        updateData();
+        render();
     }
 
     private static class ClassloaderTableModel extends AbstractTableModel {
@@ -208,6 +253,7 @@ public class SystemResourcesPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.length) return "";
             switch (col) {
                 case 0: return data[row].getLoaderClass();
                 case 1: return Integer.valueOf(data[row].getClassCount());
@@ -238,6 +284,7 @@ public class SystemResourcesPanel extends JPanel {
         public String getColumnName(int c) { return COLS[c]; }
 
         public Object getValueAt(int row, int col) {
+            if (row < 0 || row >= data.length) return "";
             ProcessInfo.ProcessEntry p = data[row];
             switch (col) {
                 case 0: return Integer.valueOf(p.pid);

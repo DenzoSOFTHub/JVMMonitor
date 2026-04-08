@@ -15,6 +15,19 @@ typedef struct finalizer_tracker {
     int              interval_ms;
     int              deadlock_interval_ms;
     uint64_t         last_deadlock_check;
+    /* JNI cache (resolved once, reused every poll) */
+    jclass     mf_global;
+    jmethodID  getPlatformBeans;
+    jmethodID  getCL;
+    jmethodID  getTM;
+    jclass     bp_class_global;
+    jmethodID  cl_getLoaded;
+    jmethodID  cl_getTotal;
+    jmethodID  cl_getUnloaded;
+    jmethodID  tm_getPeak;
+    jmethodID  tm_getDaemon;
+    jmethodID  tm_findDeadlock;
+    int        jni_cached;
 } finalizer_tracker_t;
 
 finalizer_tracker_t *finalizer_tracker_create(jvmmon_agent_t *agent, int interval_ms);
